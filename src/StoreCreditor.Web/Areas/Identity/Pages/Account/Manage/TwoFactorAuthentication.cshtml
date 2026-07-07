@@ -1,0 +1,21 @@
+@page
+@model StoreCreditor.Web.Areas.Identity.Pages.Account.Manage.TwoFactorAuthenticationModel
+@{
+    ViewData["Title"] = "Two-factor authentication";
+}
+
+<h1 class="h3 mb-3">Two-factor authentication</h1>
+<partial name="_StatusMessage" model="Model.StatusMessage" />
+<div class="row g-4">
+    <aside class="col-md-3"><partial name="_ManageNav" /></aside>
+    <section class="col-md-6">
+        <p>Email two-factor authentication is currently <strong>@(Model.IsTwoFactorEnabled ? "enabled" : "disabled")</strong>.</p>
+        @if (!Model.IsOtpEnabledForApp)
+        {
+            <div class="alert alert-info">Email OTP is disabled for this app.</div>
+        }
+        <form method="post">
+            <button class="btn btn-primary" type="submit" disabled="@(!Model.IsOtpEnabledForApp)">@(Model.IsTwoFactorEnabled ? "Disable" : "Enable") email 2FA</button>
+        </form>
+    </section>
+</div>

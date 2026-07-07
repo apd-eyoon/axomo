@@ -1,0 +1,33 @@
+@model IReadOnlyList<EmployeeStaging>
+@{
+    ViewData["Title"] = "Employee Queue";
+}
+
+<h1 class="h3 mb-3">Employee Queue</h1>
+<div class="table-responsive">
+    <table class="table table-striped align-middle">
+        <thead>
+            <tr>
+                <th>Employee ID</th>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Department</th>
+                <th>Hire Date</th>
+                <th>Processed</th>
+            </tr>
+        </thead>
+        <tbody>
+        @foreach (var employee in Model)
+        {
+            <tr>
+                <td>@employee.EmployeeId</td>
+                <td>@employee.FirstName @employee.LastName</td>
+                <td>@employee.Email</td>
+                <td>@employee.Department</td>
+                <td>@employee.HireDate</td>
+                <td>@employee.Processed</td>
+            </tr>
+        }
+        </tbody>
+    </table>
+</div>

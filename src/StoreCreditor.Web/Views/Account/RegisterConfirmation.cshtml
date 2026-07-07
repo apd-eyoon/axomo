@@ -1,0 +1,15 @@
+@inject Microsoft.AspNetCore.Hosting.IWebHostEnvironment HostEnvironment
+@{
+    ViewData["Title"] = "Confirm registration";
+    var isDevelopment = string.Equals(
+        HostEnvironment.EnvironmentName,
+        Microsoft.Extensions.Hosting.Environments.Development,
+        StringComparison.OrdinalIgnoreCase);
+}
+
+<h1 class="h3 mb-3">Confirm registration</h1>
+<p>Check your email to confirm the account.</p>
+@if (isDevelopment && ViewBag.ConfirmationLink is string link)
+{
+    <p class="small text-muted">Development confirmation link: <a href="@link">@link</a></p>
+}

@@ -1,0 +1,24 @@
+@page
+@model StoreCreditor.Web.Areas.Identity.Pages.Account.Manage.EmailModel
+@{
+    ViewData["Title"] = "Email";
+}
+
+<h1 class="h3 mb-3">Email</h1>
+<partial name="_StatusMessage" model="Model.StatusMessage" />
+<div class="row g-4">
+    <aside class="col-md-3"><partial name="_ManageNav" /></aside>
+    <section class="col-md-6">
+        <form method="post">
+            <div class="mb-3">
+                <label asp-for="Email" class="form-label"></label>
+                <input asp-for="Email" class="form-control" disabled />
+            </div>
+            <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" checked="@Model.IsEmailConfirmed" disabled />
+                <label class="form-check-label">Email confirmed</label>
+            </div>
+            <button type="submit" class="btn btn-outline-primary">Resend confirmation email</button>
+        </form>
+    </section>
+</div>

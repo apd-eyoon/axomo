@@ -1,0 +1,17 @@
+@page
+@model StoreCreditor.Web.Areas.Identity.Pages.Account.RegisterConfirmationModel
+@inject Microsoft.AspNetCore.Hosting.IWebHostEnvironment HostEnvironment
+@{
+    ViewData["Title"] = "Confirm registration";
+    var isDevelopment = string.Equals(
+        HostEnvironment.EnvironmentName,
+        Microsoft.Extensions.Hosting.Environments.Development,
+        StringComparison.OrdinalIgnoreCase);
+}
+
+<h1 class="h3 mb-3">Confirm registration</h1>
+<p>Check your email to confirm the account.</p>
+@if (isDevelopment && !string.IsNullOrWhiteSpace(Model.ConfirmationLink))
+{
+    <p class="small text-muted">Development confirmation link: <a href="@Model.ConfirmationLink">@Model.ConfirmationLink</a></p>
+}

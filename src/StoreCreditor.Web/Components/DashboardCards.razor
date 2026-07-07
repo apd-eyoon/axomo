@@ -1,0 +1,31 @@
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="metric-card">
+            <span>Pending employees</span>
+            <strong>@Pending</strong>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="metric-card">
+            <span>Processed employees</span>
+            <strong>@Processed</strong>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="metric-card">
+            <span>Credits issued</span>
+            <strong>@Issued</strong>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Microsoft.AspNetCore.Components.Parameter]
+    public int Pending { get; set; }
+
+    [Microsoft.AspNetCore.Components.Parameter]
+    public int Processed { get; set; }
+
+    [Microsoft.AspNetCore.Components.Parameter]
+    public int Issued { get; set; }
+}

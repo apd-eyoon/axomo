@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/StoreCreditor.Data/StoreCreditor.Data.csproj" />
+    <Project Path="src/StoreCreditor.Services/StoreCreditor.Services.csproj" />
+    <Project Path="src/StoreCreditor.Web/StoreCreditor.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/StoreCreditor.Tests/StoreCreditor.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,9 @@
+@page
+@model StoreCreditor.Web.Areas.Identity.Pages.Account.ConfirmEmailModel
+@{
+    ViewData["Title"] = "Email confirmed";
+}
+
+<h1 class="h3 mb-3">@Model.StatusTitle</h1>
+<p>@Model.StatusMessage</p>
+<a asp-page="./Login" class="btn btn-primary">Sign in</a>

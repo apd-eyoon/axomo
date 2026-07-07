@@ -1,0 +1,16 @@
+@model TwoFactorViewModel
+@{
+    ViewData["Title"] = "Two-factor authentication";
+}
+
+<h1 class="h3 mb-3">Two-factor authentication</h1>
+<form asp-action="LoginWith2fa" asp-route-returnUrl="@ViewBag.ReturnUrl" method="post" class="auth-form">
+    <div asp-validation-summary="ModelOnly" class="text-danger"></div>
+    <input asp-for="RememberMe" type="hidden" />
+    <div class="mb-3">
+        <label asp-for="Code" class="form-label"></label>
+        <input asp-for="Code" class="form-control" autocomplete="one-time-code" />
+        <span asp-validation-for="Code" class="text-danger"></span>
+    </div>
+    <button class="btn btn-primary" type="submit">Verify</button>
+</form>
