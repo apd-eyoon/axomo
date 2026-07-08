@@ -50,20 +50,13 @@ jobs:
             # SQL Server 2022 requires openldap >= 2.6.2 which AL2023 doesn't
             # ship — 2019 only requires openldap >= 2.4 which AL2023 satisfies.
             echo "==> Adding SQL Server 2019 repository..."
+            sudo rm -f /etc/yum.repos.d/mssql-server-2022.repo
             sudo curl -o /etc/yum.repos.d/mssql-server-2019.repo \
               https://packages.microsoft.com/config/rhel/8/mssql-server-2019.repo
 
             echo "==> Installing SQL Server..."
             sudo dnf install -y mssql-server
 
-            # SQL Server 2019 was built against openldap 2.4 and looks for
-            # libldap-2.4.so.2, but AL2023 ships openldap 2.5 (libldap-2.5.so.2).
-            # openldap must be installed explicitly — cyrus-sasl (a mssql-server dep)
-            # does not pull it in, so libldap-2.5.so.2 may not exist yet.
-            # The libraries are ABI-compatible — a symlink is all that's needed.
-            sudo dnf install -y openldap
-            sudo ln -sf /usr/lib64/libldap-2.5.so.2 /usr/lib64/libldap-2.4.so.2
-            sudo ldconfig
 
             echo "==> Configuring SQL Server (Developer edition)..."
             sudo MSSQL_SA_PASSWORD="${{ secrets.DB_SA_PASSWORD }}" \
