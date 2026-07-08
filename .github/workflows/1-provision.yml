@@ -60,6 +60,10 @@ jobs:
             # provision run may have corrupted it with a broken symlink, and
             # dnf install is a no-op when the package is already marked installed.
             sudo dnf reinstall -y openldap
+            # Refresh the dynamic linker cache so sqlservr can find libldap-2.4.so.2.
+            # dnf reinstall places the file but doesn't always update ldconfig.
+            sudo ldconfig
+            ldconfig -p | grep libldap
 
 
             echo "==> Configuring SQL Server (Developer edition)..."
