@@ -1,0 +1,71 @@
+name: 2. Teardown EC2
+
+# Completely removes the app, SQL Server, .NET runtime, and Nginx config from
+# the EC2 instance, returning it to a clean state. After running this you can
+# run the Provision workflow to start fresh.
+#
+# Targets: Amazon Linux 2023 (RHEL9-compatible)
+#
+# WARNING: This deletes all SQL Server data on the instance permanently.
+#
+# Required GitHub Secrets:
+#   EC2_HOST    - Public IP or DNS of the EC2 instance
+#   EC2_SSH_KEY - Contents of the .pem private key file
+
+on:
+  workflow_dispatch:
+
+jobs:
+  teardown:
+    name: Teardown EC2 instance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remove all deployed components
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          command_timeout: 20m
+          script: |
+            set -uo pipefail
+
+            echo "==> Stopping and removing app service..."
+            sudo systemctl stop storecreditor || true
+            sudo systemctl disable storecreditor || true
+            sudo rm -f /etc/systemd/system/storecreditor.service
+            sudo systemctl daemon-reload
+            sudo systemctl reset-failed || true
+
+            echo "==> Removing app files and secrets..."
+            sudo rm -rf /opt/storecreditor
+            sudo rm -rf /etc/storecreditor
+
+            echo "==> Stopping SQL Server..."
+            sudo systemctl stop mssql-server || true
+            sudo systemctl disable mssql-server || true
+
+            echo "==> Uninstalling SQL Server packages..."
+            sudo dnf remove -y mssql-server mssql-tools18 unixODBC-devel 2>/dev/null || true
+            sudo dnf autoremove -y || true
+
+            echo "==> Removing SQL Server data and config..."
+            sudo rm -rf /var/opt/mssql
+            sudo rm -f /etc/yum.repos.d/mssql-server-2022.repo
+            sudo rm -f /etc/yum.repos.d/mssql-release.repo
+            sudo rm -f /etc/profile.d/mssql-tools.sh
+
+            echo "==> Removing .NET runtime..."
+            sudo rm -rf /usr/share/dotnet
+            sudo rm -f /usr/local/bin/dotnet
+
+            echo "==> Removing Nginx app config..."
+            sudo rm -f /etc/nginx/conf.d/storecreditor.conf
+            sudo nginx -t && sudo systemctl reload nginx || true
+
+            echo ""
+            echo "==========================================="
+            echo " Teardown complete."
+            echo " The instance is clean. Run the Provision"
+            echo " workflow to set it up again."
+            echo "==========================================="
