@@ -32,7 +32,7 @@ jobs:
 
             echo "==> Updating system packages..."
             sudo dnf update -y
-            sudo dnf install -y curl wget nginx unzip
+            sudo dnf install -y wget nginx unzip
 
             # ── .NET 10 ASP.NET Core Runtime ──────────────────────────────────
             echo "==> Installing .NET 10 ASP.NET Core Runtime..."
