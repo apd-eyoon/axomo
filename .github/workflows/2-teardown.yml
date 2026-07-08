@@ -54,6 +54,7 @@ jobs:
             sudo rm -f /etc/yum.repos.d/mssql-server-2019.repo
             sudo rm -f /etc/yum.repos.d/mssql-release.repo
             sudo rm -f /etc/profile.d/mssql-tools.sh
+            sudo rm -f /usr/lib64/libldap-2.4.so.2
 
             echo "==> Removing .NET runtime..."
             sudo rm -rf /usr/share/dotnet
