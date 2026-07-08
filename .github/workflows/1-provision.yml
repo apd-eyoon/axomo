@@ -2,15 +2,15 @@ name: 1. Provision EC2
 
 # Installs .NET 10 runtime, SQL Server 2022, Nginx, and configures the
 # systemd service on the EC2 instance. Run this once before the first deploy,
-# or after a teardown. The instance must be reachable via SSH.
+# or after a teardown.
 #
-# Targets: Amazon Linux 2023 (RHEL9-compatible)
+# Targets: Ubuntu Server 22.04 LTS
 #
 # Required GitHub Secrets:
 #   EC2_HOST        - Public IP or DNS of the EC2 instance
 #   EC2_SSH_KEY     - Contents of the .pem private key file
-#   DB_SA_PASSWORD  - Password to set for the SQL Server 'sa' account
-#                     (min 8 chars, must include uppercase, lowercase, digit, symbol)
+#   DB_SA_PASSWORD  - Password for the SQL Server 'sa' account
+#                     (min 8 chars, uppercase, lowercase, digit, symbol)
 
 on:
   workflow_dispatch:
@@ -19,103 +19,149 @@ jobs:
   provision:
     name: Provision EC2 instance
     runs-on: ubuntu-latest
+
     steps:
       - name: Install runtime, SQL Server, and configure services
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
+          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 30m
+          command_timeout: 40m
+
           script: |
             set -euo pipefail
 
             echo "==> Updating system packages..."
-            sudo dnf update -y
-            sudo dnf install -y wget nginx unzip
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
-            # ── .NET 10 ASP.NET Core Runtime ──────────────────────────────────
-            echo "==> Installing .NET 10 ASP.NET Core Runtime..."
-            curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
-            chmod +x /tmp/dotnet-install.sh
-            sudo /tmp/dotnet-install.sh \
-              --channel 10.0 \
-              --runtime aspnetcore \
-              --install-dir /usr/share/dotnet
-            sudo ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet
+            sudo apt-get install -y \
+              curl \
+              wget \
+              unzip \
+              nginx \
+              gnupg \
+              ca-certificates \
+              apt-transport-https
+
+            ############################################################
+            # .NET 10 ASP.NET Runtime
+            ############################################################
+
+            echo "==> Installing Microsoft package repository..."
+
+            wget https://packages.microsoft.com/config/ubuntu/22.04/packages-microsoft-prod.deb
+
+            sudo dpkg -i packages-microsoft-prod.deb
+
+            rm packages-microsoft-prod.deb
+
+            sudo apt-get update
+
+            echo "==> Installing ASP.NET Core Runtime 10..."
+
+            sudo apt-get install -y aspnetcore-runtime-10.0
+
             dotnet --info
 
-            # ── SQL Server 2019 ───────────────────────────────────────────────
-            # Using SQL Server 2019 (RHEL8 repo) instead of 2022 because
-            # SQL Server 2022 requires openldap >= 2.6.2 which AL2023 doesn't
-            # ship — 2019 only requires openldap >= 2.4 which AL2023 satisfies.
-            echo "==> Adding SQL Server 2019 repository..."
-            sudo rm -f /etc/yum.repos.d/mssql-server-2022.repo
-            sudo curl -o /etc/yum.repos.d/mssql-server-2019.repo \
-              https://packages.microsoft.com/config/rhel/8/mssql-server-2019.repo
+            ############################################################
+            # SQL Server 2022
+            ############################################################
+
+            echo "==> Adding SQL Server repository..."
+
+            curl https://packages.microsoft.com/keys/microsoft.asc \
+              | sudo gpg --dearmor \
+              -o /usr/share/keyrings/microsoft.gpg
+
+            curl https://packages.microsoft.com/config/ubuntu/22.04/mssql-server-2022.list \
+              | sudo tee /etc/apt/sources.list.d/mssql-server.list
+
+            sudo apt-get update
 
             echo "==> Installing SQL Server..."
-            sudo dnf install -y mssql-server
-            # AL2023's openldap package ships libldap_r-2.4.so.2 (the reentrant variant)
-            # but SQL Server 2019 was linked against libldap-2.4.so.2 (no _r suffix).
-            # Symlink the existing library to the name SQL Server expects.
-            sudo ln -sf /lib64/libldap_r-2.4.so.2 /lib64/libldap-2.4.so.2
-            sudo ldconfig
 
+            sudo ACCEPT_EULA=Y \
+              apt-get install -y mssql-server
 
-            echo "==> Configuring SQL Server (Developer edition)..."
+            echo "==> Configuring SQL Server..."
+
             sudo MSSQL_SA_PASSWORD="${{ secrets.DB_SA_PASSWORD }}" \
-                 MSSQL_PID="Developer" \
-                 ACCEPT_EULA="Y" \
-                 /opt/mssql/bin/mssql-conf -n setup
+              MSSQL_PID=Developer \
+              ACCEPT_EULA=Y \
+              /opt/mssql/bin/mssql-conf -n setup
 
             sudo systemctl enable mssql-server
             sudo systemctl start mssql-server
 
-            echo "==> Waiting for SQL Server to be ready..."
+            echo "==> Waiting for SQL Server to start..."
+
             SQL_STARTED=0
-            for i in $(seq 1 12); do
+
+            for i in $(seq 1 30); do
               if sudo systemctl is-active --quiet mssql-server; then
                 echo "SQL Server is running."
                 SQL_STARTED=1
                 break
               fi
-              echo "  Attempt $i/12 — waiting 5s..."
+
+              echo "Waiting... ($i/30)"
               sleep 5
             done
+
             if [ "$SQL_STARTED" -eq 0 ]; then
-              echo "==> ERROR: SQL Server failed to start. Error log:"
-              sudo cat /var/opt/mssql/log/errorlog 2>/dev/null | tail -40 || true
-              sudo journalctl -u mssql-server --no-pager -n 30 || true
+              echo "SQL Server failed to start."
+
+              sudo systemctl status mssql-server --no-pager || true
+              sudo journalctl -u mssql-server --no-pager -n 100 || true
+              sudo cat /var/opt/mssql/log/errorlog || true
+
               exit 1
             fi
 
-            # ── sqlcmd tools ──────────────────────────────────────────────────
-            echo "==> Installing sqlcmd tools..."
-            sudo curl -o /etc/yum.repos.d/mssql-release.repo \
-              https://packages.microsoft.com/config/rhel/8/prod.repo
-            sudo ACCEPT_EULA=Y dnf install -y mssql-tools18 unixODBC-devel
+            ############################################################
+            # SQLCMD Tools
+            ############################################################
+
+            echo "==> Installing sqlcmd..."
+
+            curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+              | sudo tee /etc/apt/sources.list.d/msprod.list
+
+            sudo apt-get update
+
+            sudo ACCEPT_EULA=Y apt-get install -y \
+              mssql-tools18 \
+              unixodbc-dev
+
             echo 'export PATH="$PATH:/opt/mssql-tools18/bin"' \
-              | sudo tee /etc/profile.d/mssql-tools.sh > /dev/null
+              | sudo tee /etc/profile.d/mssql-tools.sh >/dev/null
 
-            # ── App directories ───────────────────────────────────────────────
+            ############################################################
+            # Application directories
+            ############################################################
+
             echo "==> Creating application directories..."
-            sudo mkdir -p /opt/storecreditor
-            sudo chown ec2-user:ec2-user /opt/storecreditor
 
-            # Secrets directory — only readable by ec2-user (the service user)
+            sudo mkdir -p /opt/storecreditor
+            sudo chown ubuntu:ubuntu /opt/storecreditor
+
             sudo mkdir -p /etc/storecreditor
-            sudo chown ec2-user:ec2-user /etc/storecreditor
+            sudo chown ubuntu:ubuntu /etc/storecreditor
             sudo chmod 700 /etc/storecreditor
 
-            # Placeholder environment file so the service can start even before
-            # the first deploy writes real values.
-            touch /etc/storecreditor/environment
-            chmod 600 /etc/storecreditor/environment
+            sudo touch /etc/storecreditor/environment
+            sudo chmod 600 /etc/storecreditor/environment
+            sudo chown ubuntu:ubuntu /etc/storecreditor/environment
 
-            # ── systemd service ───────────────────────────────────────────────
+            ############################################################
+            # systemd service
+            ############################################################
+
             echo "==> Creating systemd service..."
-            sudo tee /etc/systemd/system/storecreditor.service > /dev/null <<'SERVICE'
+
+            sudo tee /etc/systemd/system/storecreditor.service >/dev/null <<'SERVICE'
             [Unit]
             Description=StoreCreditor ASP.NET Core Application
             After=network.target mssql-server.service
@@ -123,12 +169,12 @@ jobs:
 
             [Service]
             WorkingDirectory=/opt/storecreditor
-            ExecStart=/usr/local/bin/dotnet /opt/storecreditor/StoreCreditor.Web.dll
+            ExecStart=/usr/bin/dotnet /opt/storecreditor/StoreCreditor.Web.dll
             Restart=always
             RestartSec=10
             KillSignal=SIGINT
             SyslogIdentifier=storecreditor
-            User=ec2-user
+            User=ubuntu
             EnvironmentFile=/etc/storecreditor/environment
 
             [Install]
@@ -137,10 +183,15 @@ jobs:
 
             sudo systemctl daemon-reload
 
-            # ── Nginx reverse proxy ───────────────────────────────────────────
-            # Amazon Linux nginx uses conf.d/ — no sites-available/sites-enabled
+            ############################################################
+            # Nginx
+            ############################################################
+
             echo "==> Configuring Nginx..."
-            sudo tee /etc/nginx/conf.d/storecreditor.conf > /dev/null <<'NGINX'
+
+            sudo rm -f /etc/nginx/sites-enabled/default
+
+            sudo tee /etc/nginx/sites-available/storecreditor >/dev/null <<'NGINX'
             server {
                 listen 80;
                 server_name _;
@@ -148,25 +199,39 @@ jobs:
                 client_max_body_size 50M;
 
                 location / {
-                    proxy_pass         http://localhost:5000;
+                    proxy_pass http://localhost:5000;
                     proxy_http_version 1.1;
-                    proxy_set_header   Upgrade $http_upgrade;
-                    proxy_set_header   Connection keep-alive;
-                    proxy_set_header   Host $host;
-                    proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
-                    proxy_set_header   X-Forwarded-Proto $scheme;
-                    proxy_read_timeout 90;
+
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection "keep-alive";
+                    proxy_set_header Host $host;
+                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto $scheme;
+
                     proxy_cache_bypass $http_upgrade;
+                    proxy_read_timeout 90;
                 }
             }
             NGINX
 
+            sudo ln -sf \
+              /etc/nginx/sites-available/storecreditor \
+              /etc/nginx/sites-enabled/storecreditor
+
             sudo nginx -t
+
             sudo systemctl enable nginx
             sudo systemctl restart nginx
+
+            ############################################################
+            # Finished
+            ############################################################
 
             echo ""
             echo "=========================================="
             echo " Provisioning complete."
-            echo " Run the Deploy workflow to push the app."
+            echo " .NET 10 Runtime installed"
+            echo " SQL Server 2022 installed"
+            echo " Nginx configured"
+            echo " Ready for deployment"
             echo "=========================================="
