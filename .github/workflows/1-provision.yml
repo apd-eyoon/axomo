@@ -8,9 +8,9 @@ name: 1. Provision EC2
 #
 # SQL Server requires at least 2 GB RAM — do not run on t3.micro.
 #
-# Ubuntu 26.04 note: Microsoft may not have published SQL Server 2022 packages
-# for 26.04 yet. This workflow detects that and falls back to the 24.04 repo,
-# which is binary-compatible with 26.04.
+# Ubuntu 26.04 note: Microsoft typically lags several months behind new Ubuntu
+# releases for SQL Server packages. This workflow probes 26.04 → 24.04 → 22.04
+# and uses the first version that has a published repo (all are binary-compatible).
 #
 # Required GitHub Secrets:
 #   EC2_HOST        - Public IP or DNS of the EC2 instance
@@ -84,18 +84,27 @@ jobs:
             curl https://packages.microsoft.com/keys/microsoft.asc \
               | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
 
-            # Determine which Ubuntu version Microsoft has a SQL Server repo for
-            MSSQL_UBUNTU_VER="${UBUNTU_VERSION}"
-            MSSQL_LIST_URL="https://packages.microsoft.com/config/ubuntu/${MSSQL_UBUNTU_VER}/mssql-server-2022.list"
+            # Probe Ubuntu versions in order until we find a working SQL Server 2022 repo.
+            # Microsoft typically supports a limited set of Ubuntu LTS versions; new releases
+            # often lag by several months. The 22.04 repo is the last known-stable fallback.
+            MSSQL_UBUNTU_VER=""
+            for ver in "${UBUNTU_VERSION}" "24.04" "22.04"; do
+              if curl -fsI "https://packages.microsoft.com/config/ubuntu/${ver}/mssql-server-2022.list" \
+                   > /dev/null 2>&1; then
+                MSSQL_UBUNTU_VER="${ver}"
+                [ "${ver}" != "${UBUNTU_VERSION}" ] && \
+                  echo "  No SQL Server 2022 repo for Ubuntu ${UBUNTU_VERSION}; using ${ver} repo (binary-compatible)."
+                break
+              fi
+              echo "  No SQL Server 2022 repo for Ubuntu ${ver}."
+            done
 
-            if ! curl -fsI "${MSSQL_LIST_URL}" > /dev/null 2>&1; then
-              echo "  No SQL Server 2022 repo found for Ubuntu ${MSSQL_UBUNTU_VER}."
-              echo "  Falling back to Ubuntu 24.04 repo (binary-compatible)..."
-              MSSQL_UBUNTU_VER="24.04"
-              MSSQL_LIST_URL="https://packages.microsoft.com/config/ubuntu/${MSSQL_UBUNTU_VER}/mssql-server-2022.list"
+            if [ -z "${MSSQL_UBUNTU_VER}" ]; then
+              echo "ERROR: No SQL Server 2022 apt repo found (tried ${UBUNTU_VERSION}, 24.04, 22.04)."
+              exit 1
             fi
 
-            curl "${MSSQL_LIST_URL}" \
+            curl -f "https://packages.microsoft.com/config/ubuntu/${MSSQL_UBUNTU_VER}/mssql-server-2022.list" \
               | sudo tee /etc/apt/sources.list.d/mssql-server.list
 
             sudo apt-get update
@@ -138,10 +147,23 @@ jobs:
 
             echo "==> Installing sqlcmd..."
 
-            # Reuse the same fallback version for the prod tools list
-            PROD_LIST_URL="https://packages.microsoft.com/config/ubuntu/${MSSQL_UBUNTU_VER}/prod.list"
+            # Use the same resolved version for the sqlcmd tools repo.
+            # If that version also lacks a prod.list, fall back the same way.
+            PROD_UBUNTU_VER=""
+            for ver in "${MSSQL_UBUNTU_VER}" "24.04" "22.04"; do
+              if curl -fsI "https://packages.microsoft.com/config/ubuntu/${ver}/prod.list" \
+                   > /dev/null 2>&1; then
+                PROD_UBUNTU_VER="${ver}"
+                break
+              fi
+            done
 
-            curl "${PROD_LIST_URL}" \
+            if [ -z "${PROD_UBUNTU_VER}" ]; then
+              echo "ERROR: No sqlcmd apt repo found (tried ${MSSQL_UBUNTU_VER}, 24.04, 22.04)."
+              exit 1
+            fi
+
+            curl -f "https://packages.microsoft.com/config/ubuntu/${PROD_UBUNTU_VER}/prod.list" \
               | sudo tee /etc/apt/sources.list.d/msprod.list
 
             sudo apt-get update
