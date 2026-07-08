@@ -75,14 +75,22 @@ jobs:
             sudo systemctl start mssql-server
 
             echo "==> Waiting for SQL Server to be ready..."
+            SQL_STARTED=0
             for i in $(seq 1 12); do
               if sudo systemctl is-active --quiet mssql-server; then
                 echo "SQL Server is running."
+                SQL_STARTED=1
                 break
               fi
               echo "  Attempt $i/12 — waiting 5s..."
               sleep 5
             done
+            if [ "$SQL_STARTED" -eq 0 ]; then
+              echo "==> ERROR: SQL Server failed to start. Error log:"
+              sudo cat /var/opt/mssql/log/errorlog 2>/dev/null | tail -40 || true
+              sudo journalctl -u mssql-server --no-pager -n 30 || true
+              exit 1
+            fi
 
             # ── sqlcmd tools ──────────────────────────────────────────────────
             echo "==> Installing sqlcmd tools..."
