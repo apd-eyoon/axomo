@@ -2,8 +2,8 @@ name: 3. Deploy to EC2
 
 # Triggered on every push to main. Publishes the ASP.NET Core app, generates
 # an idempotent EF Core migration script, copies everything to the EC2
-# instance, writes production secrets, runs migrations, and restarts the
-# systemd service.
+# instance, writes production secrets, runs migrations against the local SQL
+# Server instance, and restarts the systemd service.
 #
 # The Provision workflow must have been run at least once before this.
 #
@@ -17,7 +17,7 @@ name: 3. Deploy to EC2
 #   AXOMO_API_KEY         - Axomo API key
 #   AXOMO_BEARER_TOKEN    - Axomo bearer token
 #
-# Optional secrets (only needed if MicrosoftEntraId SSO is enabled):
+# Optional secrets (only needed if Microsoft Entra ID SSO is enabled):
 #   ENTRA_TENANT_ID       - Azure AD / Entra tenant ID
 #   ENTRA_CLIENT_ID       - Entra app registration client ID
 #   ENTRA_CLIENT_SECRET   - Entra app registration client secret
@@ -73,8 +73,8 @@ jobs:
             --output ./publish/migrate.sql \
             --no-build
         env:
-          # Provide a placeholder connection string so the startup project can
-          # load without a real DB — the script is generated at design time.
+          # Placeholder connection string — only needed so the startup project
+          # can initialise at design time. Not used against a real database.
           ConnectionStrings__DefaultConnection: "Server=localhost;Database=StoreCreditor;User ID=sa;Password=placeholder;TrustServerCertificate=True"
 
       # ── 7. Copy published output to EC2 ─────────────────────────────────────
@@ -82,7 +82,7 @@ jobs:
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
+          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           source: "./publish/*"
           target: "/opt/storecreditor"
@@ -94,24 +94,22 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
+          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           command_timeout: 15m
+
           script: |
             set -euo pipefail
 
             # ── Write environment file ───────────────────────────────────────
-            # ASP.NET Core reads environment variables using __ as the
-            # hierarchy separator, e.g. SMTP__Host maps to SMTP:Host in config.
+            # ${{ secrets.* }} expressions are substituted by GitHub Actions
+            # before this script is sent to the instance. The quoted heredoc
+            # (<<'ENVEOF') prevents the remote shell from doing a second round
+            # of $ expansion on those already-substituted literal values.
             echo "==> Writing production environment file..."
             cat > /etc/storecreditor/environment <<'ENVEOF'
             ASPNETCORE_ENVIRONMENT=Production
             ASPNETCORE_URLS=http://localhost:5000
-            ENVEOF
-
-            # Append secrets — done outside the heredoc so GitHub Actions
-            # substitutes the secret values before sending the script.
-            cat >> /etc/storecreditor/environment <<SECRETS
             ConnectionStrings__DefaultConnection=Server=localhost;Database=StoreCreditor;User ID=sa;Password=${{ secrets.DB_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True
             BambooHR__ApiKey=${{ secrets.BAMBOOHR_API_KEY }}
             Axomo__ApiKey=${{ secrets.AXOMO_API_KEY }}
@@ -121,30 +119,45 @@ jobs:
             MicrosoftEntraId__ClientSecret=${{ secrets.ENTRA_CLIENT_SECRET }}
             MicrosoftEntraId__RedirectUri=http://${{ secrets.EC2_HOST }}/signin-oidc
             MicrosoftEntraId__PostLogoutRedirectUri=http://${{ secrets.EC2_HOST }}/Identity/Account/Login
-            SECRETS
+            ENVEOF
 
             chmod 600 /etc/storecreditor/environment
 
-            # ── Run EF migrations ────────────────────────────────────────────
-            echo "==> Running database migrations..."
+            # ── Wait for SQL Server to accept connections ────────────────────
+            echo "==> Waiting for SQL Server..."
             export PATH="$PATH:/opt/mssql-tools18/bin"
 
-            # Wait up to 30s for SQL Server to be accepting connections
-            for i in $(seq 1 6); do
-              if sqlcmd -S localhost -U sa -P "${{ secrets.DB_SA_PASSWORD }}" \
+            SQL_READY=0
+            for i in $(seq 1 12); do
+              if sqlcmd -S localhost -U sa -P '${{ secrets.DB_SA_PASSWORD }}' \
                    -Q "SELECT 1" -C -l 5 > /dev/null 2>&1; then
                 echo "SQL Server is accepting connections."
+                SQL_READY=1
                 break
               fi
-              echo "  Waiting for SQL Server... ($i/6)"
+              echo "  Waiting... ($i/12)"
               sleep 5
             done
 
+            if [ "$SQL_READY" -eq 0 ]; then
+              echo "ERROR: SQL Server did not become ready after 60 seconds."
+              sudo systemctl status mssql-server --no-pager || true
+              sudo journalctl -u mssql-server --no-pager -n 50 || true
+              exit 1
+            fi
+
+            # ── Ensure the application database exists ───────────────────────
+            echo "==> Ensuring StoreCreditor database exists..."
+            sqlcmd -S localhost -U sa -P '${{ secrets.DB_SA_PASSWORD }}' -C \
+              -Q "IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'StoreCreditor') CREATE DATABASE StoreCreditor;"
+
+            # ── Run EF migrations ────────────────────────────────────────────
+            echo "==> Running database migrations..."
             sqlcmd \
               -S localhost \
               -U sa \
-              -P "${{ secrets.DB_SA_PASSWORD }}" \
-              -d master \
+              -P '${{ secrets.DB_SA_PASSWORD }}' \
+              -d StoreCreditor \
               -i /opt/storecreditor/migrate.sql \
               -C \
               -b

@@ -1,12 +1,12 @@
 name: 2. Teardown EC2
 
-# Completely removes the app, SQL Server, .NET runtime, and Nginx config from
-# the EC2 instance, returning it to a clean state. After running this you can
-# run the Provision workflow to start fresh.
+# Completely removes the app, SQL Server, .NET runtime, sqlcmd, and Nginx
+# config from the EC2 instance, returning it to a clean state. Run the
+# Provision workflow afterward to set it up again.
 #
-# Targets: Amazon Linux 2023 (RHEL9-compatible)
+# WARNING: This permanently deletes all SQL Server data on the instance.
 #
-# WARNING: This deletes all SQL Server data on the instance permanently.
+# Targets: Ubuntu Server 24.04 LTS or 26.04 LTS
 #
 # Required GitHub Secrets:
 #   EC2_HOST    - Public IP or DNS of the EC2 instance
@@ -19,14 +19,16 @@ jobs:
   teardown:
     name: Teardown EC2 instance
     runs-on: ubuntu-latest
+
     steps:
       - name: Remove all deployed components
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
+          username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           command_timeout: 20m
+
           script: |
             set -uo pipefail
 
@@ -46,22 +48,30 @@ jobs:
             sudo systemctl disable mssql-server || true
 
             echo "==> Uninstalling SQL Server packages..."
-            sudo dnf remove -y mssql-server mssql-tools18 unixODBC-devel 2>/dev/null || true
-            sudo dnf autoremove -y || true
+            sudo apt-get remove -y mssql-server || true
+            sudo apt-get autoremove -y || true
 
             echo "==> Removing SQL Server data and config..."
             sudo rm -rf /var/opt/mssql
-            sudo rm -f /etc/yum.repos.d/mssql-server-2019.repo
-            sudo rm -f /etc/yum.repos.d/mssql-release.repo
-            sudo rm -f /etc/profile.d/mssql-tools.sh
-
+            sudo rm -f /etc/apt/sources.list.d/mssql-server.list
 
             echo "==> Removing .NET runtime..."
-            sudo rm -rf /usr/share/dotnet
-            sudo rm -f /usr/local/bin/dotnet
+            sudo apt-get remove -y aspnetcore-runtime-10.0 || true
+            sudo apt-get autoremove -y || true
+
+            echo "==> Removing sqlcmd..."
+            sudo ACCEPT_EULA=Y apt-get remove -y mssql-tools18 unixodbc-dev || true
+            sudo rm -f /etc/apt/sources.list.d/msprod.list
+            sudo rm -f /usr/share/keyrings/microsoft.gpg
+            sudo rm -f /etc/profile.d/mssql-tools.sh
+
+            echo "==> Removing Microsoft package repository..."
+            sudo apt-get remove -y packages-microsoft-prod || true
+            sudo apt-get autoremove -y || true
 
             echo "==> Removing Nginx app config..."
-            sudo rm -f /etc/nginx/conf.d/storecreditor.conf
+            sudo rm -f /etc/nginx/sites-enabled/storecreditor
+            sudo rm -f /etc/nginx/sites-available/storecreditor
             sudo nginx -t && sudo systemctl reload nginx || true
 
             echo ""

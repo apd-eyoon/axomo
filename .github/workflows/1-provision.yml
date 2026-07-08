@@ -1,16 +1,22 @@
 name: 1. Provision EC2
 
-# Installs .NET 10 runtime, SQL Server 2022, Nginx, and configures the
-# systemd service on the EC2 instance. Run this once before the first deploy,
-# or after a teardown.
+# Installs .NET 10 ASP.NET Core Runtime, SQL Server 2022, sqlcmd, Nginx, and
+# configures the systemd service on the EC2 instance. Run this once before
+# the first deploy, or after a teardown.
 #
-# Targets: Ubuntu Server 22.04 LTS
+# Targets: Ubuntu Server 24.04 LTS or 26.04 LTS (t3.medium or larger)
+#
+# SQL Server requires at least 2 GB RAM — do not run on t3.micro.
+#
+# Ubuntu 26.04 note: Microsoft may not have published SQL Server 2022 packages
+# for 26.04 yet. This workflow detects that and falls back to the 24.04 repo,
+# which is binary-compatible with 26.04.
 #
 # Required GitHub Secrets:
 #   EC2_HOST        - Public IP or DNS of the EC2 instance
 #   EC2_SSH_KEY     - Contents of the .pem private key file
 #   DB_SA_PASSWORD  - Password for the SQL Server 'sa' account
-#                     (min 8 chars, uppercase, lowercase, digit, symbol)
+#                     (min 8 chars, mix of upper, lower, digit, symbol)
 
 on:
   workflow_dispatch:
@@ -21,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install runtime, SQL Server, and configure services
+      - name: Install runtime, SQL Server, Nginx and configure services
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -46,47 +52,58 @@ jobs:
               apt-transport-https
 
             ############################################################
-            # .NET 10 ASP.NET Runtime
+            # Microsoft package repository
             ############################################################
 
             echo "==> Installing Microsoft package repository..."
 
-            wget https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb
+            UBUNTU_VERSION=$(lsb_release -rs)
 
+            wget "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb" \
+              -O packages-microsoft-prod.deb
             sudo dpkg -i packages-microsoft-prod.deb
-
             rm packages-microsoft-prod.deb
-
             sudo apt-get update
 
+            ############################################################
+            # .NET 10 ASP.NET Runtime
+            ############################################################
+
             echo "==> Installing ASP.NET Core Runtime 10..."
-
             sudo apt-get install -y aspnetcore-runtime-10.0
-
             dotnet --info
 
             ############################################################
             # SQL Server 2022
+            # Falls back to the 24.04 repo if 26.04 packages are not yet
+            # published by Microsoft.
             ############################################################
 
-            echo "==> Adding SQL Server repository..."
+            echo "==> Adding SQL Server 2022 repository..."
 
             curl https://packages.microsoft.com/keys/microsoft.asc \
-              | sudo gpg --dearmor \
-              -o /usr/share/keyrings/microsoft.gpg
+              | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
 
-            curl https://packages.microsoft.com/config/ubuntu/22.04/mssql-server-2022.list \
+            # Determine which Ubuntu version Microsoft has a SQL Server repo for
+            MSSQL_UBUNTU_VER="${UBUNTU_VERSION}"
+            MSSQL_LIST_URL="https://packages.microsoft.com/config/ubuntu/${MSSQL_UBUNTU_VER}/mssql-server-2022.list"
+
+            if ! curl -fsI "${MSSQL_LIST_URL}" > /dev/null 2>&1; then
+              echo "  No SQL Server 2022 repo found for Ubuntu ${MSSQL_UBUNTU_VER}."
+              echo "  Falling back to Ubuntu 24.04 repo (binary-compatible)..."
+              MSSQL_UBUNTU_VER="24.04"
+              MSSQL_LIST_URL="https://packages.microsoft.com/config/ubuntu/${MSSQL_UBUNTU_VER}/mssql-server-2022.list"
+            fi
+
+            curl "${MSSQL_LIST_URL}" \
               | sudo tee /etc/apt/sources.list.d/mssql-server.list
 
             sudo apt-get update
 
-            echo "==> Installing SQL Server..."
-
-            sudo ACCEPT_EULA=Y \
-              apt-get install -y mssql-server
+            echo "==> Installing SQL Server 2022..."
+            sudo ACCEPT_EULA=Y apt-get install -y mssql-server
 
             echo "==> Configuring SQL Server..."
-
             sudo MSSQL_SA_PASSWORD="${{ secrets.DB_SA_PASSWORD }}" \
               MSSQL_PID=Developer \
               ACCEPT_EULA=Y \
@@ -96,37 +113,35 @@ jobs:
             sudo systemctl start mssql-server
 
             echo "==> Waiting for SQL Server to start..."
-
             SQL_STARTED=0
-
             for i in $(seq 1 30); do
               if sudo systemctl is-active --quiet mssql-server; then
                 echo "SQL Server is running."
                 SQL_STARTED=1
                 break
               fi
-
-              echo "Waiting... ($i/30)"
+              echo "  Waiting... ($i/30)"
               sleep 5
             done
 
             if [ "$SQL_STARTED" -eq 0 ]; then
-              echo "SQL Server failed to start."
-
+              echo "ERROR: SQL Server failed to start."
               sudo systemctl status mssql-server --no-pager || true
               sudo journalctl -u mssql-server --no-pager -n 100 || true
               sudo cat /var/opt/mssql/log/errorlog || true
-
               exit 1
             fi
 
             ############################################################
-            # SQLCMD Tools
+            # sqlcmd
             ############################################################
 
             echo "==> Installing sqlcmd..."
 
-            curl https://packages.microsoft.com/config/ubuntu/22.04/prod.list \
+            # Reuse the same fallback version for the prod tools list
+            PROD_LIST_URL="https://packages.microsoft.com/config/ubuntu/${MSSQL_UBUNTU_VER}/prod.list"
+
+            curl "${PROD_LIST_URL}" \
               | sudo tee /etc/apt/sources.list.d/msprod.list
 
             sudo apt-get update
@@ -136,10 +151,10 @@ jobs:
               unixodbc-dev
 
             echo 'export PATH="$PATH:/opt/mssql-tools18/bin"' \
-              | sudo tee /etc/profile.d/mssql-tools.sh >/dev/null
+              | sudo tee /etc/profile.d/mssql-tools.sh > /dev/null
 
             ############################################################
-            # Application directories
+            # Application directories and secrets file
             ############################################################
 
             echo "==> Creating application directories..."
@@ -161,7 +176,7 @@ jobs:
 
             echo "==> Creating systemd service..."
 
-            sudo tee /etc/systemd/system/storecreditor.service >/dev/null <<'SERVICE'
+            sudo tee /etc/systemd/system/storecreditor.service > /dev/null <<'SERVICE'
             [Unit]
             Description=StoreCreditor ASP.NET Core Application
             After=network.target mssql-server.service
@@ -184,14 +199,14 @@ jobs:
             sudo systemctl daemon-reload
 
             ############################################################
-            # Nginx
+            # Nginx reverse proxy
             ############################################################
 
             echo "==> Configuring Nginx..."
 
             sudo rm -f /etc/nginx/sites-enabled/default
 
-            sudo tee /etc/nginx/sites-available/storecreditor >/dev/null <<'NGINX'
+            sudo tee /etc/nginx/sites-available/storecreditor > /dev/null <<'NGINX'
             server {
                 listen 80;
                 server_name _;
@@ -224,14 +239,15 @@ jobs:
             sudo systemctl restart nginx
 
             ############################################################
-            # Finished
+            # Done
             ############################################################
 
             echo ""
             echo "=========================================="
             echo " Provisioning complete."
-            echo " .NET 10 Runtime installed"
-            echo " SQL Server 2022 installed"
-            echo " Nginx configured"
+            echo " .NET 10 Runtime:  installed"
+            echo " SQL Server 2022:  installed and running"
+            echo " sqlcmd:           installed"
+            echo " Nginx:            configured"
             echo " Ready for deployment"
             echo "=========================================="
