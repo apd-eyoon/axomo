@@ -124,14 +124,22 @@ jobs:
               sudo apt-get install -y libldap-2.5-0
             else
               sudo apt-get install -y libldap2 2>/dev/null || true
+              # OpenLDAP 2.5 used versioned sonames (liblber-2.5.so.0).
+              # OpenLDAP 2.6+ switched to unversioned sonames (liblber.so.2).
+              # Try each known filename in preference order and symlink the first match.
               LIB_DIR="/usr/lib/x86_64-linux-gnu"
               for lib in liblber libldap; do
-                src=$(find "${LIB_DIR}" -maxdepth 1 -name "${lib}-[0-9]*.so.[0-9]*" \
-                           ! -name "${lib}-2.5.so.0" 2>/dev/null | sort -V | tail -1)
-                if [ -n "${src}" ] && [ ! -e "${LIB_DIR}/${lib}-2.5.so.0" ]; then
-                  echo "  Linking $(basename "${src}") -> ${lib}-2.5.so.0"
-                  sudo ln -sf "${src}" "${LIB_DIR}/${lib}-2.5.so.0"
-                fi
+                target="${LIB_DIR}/${lib}-2.5.so.0"
+                if [ -e "${target}" ]; then continue; fi
+                for candidate in "${lib}.so.2" "${lib}-2.6.so.0" "${lib}.so.0"; do
+                  if [ -e "${LIB_DIR}/${candidate}" ]; then
+                    echo "  Linking ${candidate} -> ${lib}-2.5.so.0"
+                    sudo ln -sf "${LIB_DIR}/${candidate}" "${target}"
+                    break
+                  fi
+                done
+                [ ! -e "${target}" ] && \
+                  echo "WARNING: no source found for ${lib}-2.5.so.0 — SQL Server may not start"
               done
               sudo ldconfig
             fi
