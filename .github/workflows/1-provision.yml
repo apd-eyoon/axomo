@@ -81,8 +81,11 @@ jobs:
 
             echo "==> Adding SQL Server 2022 repository..."
 
+            # Save to trusted.gpg.d so apt trusts it automatically without
+            # requiring a signed-by= directive in the downloaded .list files.
             curl https://packages.microsoft.com/keys/microsoft.asc \
-              | sudo gpg --dearmor -o /usr/share/keyrings/microsoft.gpg
+              | sudo gpg --dearmor \
+              | sudo tee /etc/apt/trusted.gpg.d/microsoft.gpg > /dev/null
 
             # Probe Ubuntu versions in order until we find a working SQL Server 2022 repo.
             # Microsoft typically supports a limited set of Ubuntu LTS versions; new releases
