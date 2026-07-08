@@ -115,6 +115,27 @@ jobs:
             echo "==> Installing SQL Server 2022..."
             sudo ACCEPT_EULA=Y apt-get install -y mssql-server
 
+            echo "==> Installing SQL Server runtime library dependencies..."
+            # mssql-server was compiled for Ubuntu 22.04 (OpenLDAP 2.5) and requires
+            # liblber-2.5.so.0 at runtime. On Ubuntu 26.04, libldap-2.5-0 has been
+            # replaced by libldap-2.6-0. Install it if available; otherwise create a
+            # compatibility symlink from whatever OpenLDAP version the OS provides.
+            if apt-cache show libldap-2.5-0 2>/dev/null | grep -q '^Package:'; then
+              sudo apt-get install -y libldap-2.5-0
+            else
+              sudo apt-get install -y libldap2 2>/dev/null || true
+              LIB_DIR="/usr/lib/x86_64-linux-gnu"
+              for lib in liblber libldap; do
+                src=$(find "${LIB_DIR}" -maxdepth 1 -name "${lib}-[0-9]*.so.[0-9]*" \
+                           ! -name "${lib}-2.5.so.0" 2>/dev/null | sort -V | tail -1)
+                if [ -n "${src}" ] && [ ! -e "${LIB_DIR}/${lib}-2.5.so.0" ]; then
+                  echo "  Linking $(basename "${src}") -> ${lib}-2.5.so.0"
+                  sudo ln -sf "${src}" "${LIB_DIR}/${lib}-2.5.so.0"
+                fi
+              done
+              sudo ldconfig
+            fi
+
             echo "==> Configuring SQL Server..."
             sudo MSSQL_SA_PASSWORD="${{ secrets.DB_SA_PASSWORD }}" \
               MSSQL_PID=Developer \
