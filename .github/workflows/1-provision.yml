@@ -40,7 +40,7 @@ jobs:
             chmod +x /tmp/dotnet-install.sh
             sudo /tmp/dotnet-install.sh \
               --channel 10.0 \
-              --runtime aspnet \
+              --runtime aspnetcore \
               --install-dir /usr/share/dotnet
             sudo ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet
             dotnet --info
