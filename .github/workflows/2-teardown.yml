@@ -51,7 +51,7 @@ jobs:
 
             echo "==> Removing SQL Server data and config..."
             sudo rm -rf /var/opt/mssql
-            sudo rm -f /etc/yum.repos.d/mssql-server-2022.repo
+            sudo rm -f /etc/yum.repos.d/mssql-server-2019.repo
             sudo rm -f /etc/yum.repos.d/mssql-release.repo
             sudo rm -f /etc/profile.d/mssql-tools.sh
 

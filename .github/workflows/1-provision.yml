@@ -45,11 +45,13 @@ jobs:
             sudo ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet
             dotnet --info
 
-            # ── SQL Server 2022 ───────────────────────────────────────────────
-            # AL2023 is RHEL9-compatible — use the rhel/9 repo
-            echo "==> Adding SQL Server 2022 repository..."
-            sudo curl -o /etc/yum.repos.d/mssql-server-2022.repo \
-              https://packages.microsoft.com/config/rhel/9/mssql-server-2022.repo
+            # ── SQL Server 2019 ───────────────────────────────────────────────
+            # Using SQL Server 2019 (RHEL8 repo) instead of 2022 because
+            # SQL Server 2022 requires openldap >= 2.6.2 which AL2023 doesn't
+            # ship — 2019 only requires openldap >= 2.4 which AL2023 satisfies.
+            echo "==> Adding SQL Server 2019 repository..."
+            sudo curl -o /etc/yum.repos.d/mssql-server-2019.repo \
+              https://packages.microsoft.com/config/rhel/8/mssql-server-2019.repo
 
             echo "==> Installing SQL Server..."
             sudo dnf install -y mssql-server
@@ -76,7 +78,7 @@ jobs:
             # ── sqlcmd tools ──────────────────────────────────────────────────
             echo "==> Installing sqlcmd tools..."
             sudo curl -o /etc/yum.repos.d/mssql-release.repo \
-              https://packages.microsoft.com/config/rhel/9/prod.repo
+              https://packages.microsoft.com/config/rhel/8/prod.repo
             sudo ACCEPT_EULA=Y dnf install -y mssql-tools18 unixODBC-devel
             echo 'export PATH="$PATH:/opt/mssql-tools18/bin"' \
               | sudo tee /etc/profile.d/mssql-tools.sh > /dev/null
