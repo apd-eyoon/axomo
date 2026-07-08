@@ -58,7 +58,10 @@ jobs:
 
             # SQL Server 2019 was built against openldap 2.4 and looks for
             # libldap-2.4.so.2, but AL2023 ships openldap 2.5 (libldap-2.5.so.2).
-            # The library is ABI-compatible — a symlink is all that's needed.
+            # openldap must be installed explicitly — cyrus-sasl (a mssql-server dep)
+            # does not pull it in, so libldap-2.5.so.2 may not exist yet.
+            # The libraries are ABI-compatible — a symlink is all that's needed.
+            sudo dnf install -y openldap
             sudo ln -sf /usr/lib64/libldap-2.5.so.2 /usr/lib64/libldap-2.4.so.2
             sudo ldconfig
 
