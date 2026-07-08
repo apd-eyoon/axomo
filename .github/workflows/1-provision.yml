@@ -56,14 +56,11 @@ jobs:
 
             echo "==> Installing SQL Server..."
             sudo dnf install -y mssql-server
-            # Reinstall openldap to restore libldap-2.4.so.2 — a previous failed
-            # provision run may have corrupted it with a broken symlink, and
-            # dnf install is a no-op when the package is already marked installed.
-            sudo dnf reinstall -y openldap
-            # Refresh the dynamic linker cache so sqlservr can find libldap-2.4.so.2.
-            # dnf reinstall places the file but doesn't always update ldconfig.
+            # AL2023's openldap package ships libldap_r-2.4.so.2 (the reentrant variant)
+            # but SQL Server 2019 was linked against libldap-2.4.so.2 (no _r suffix).
+            # Symlink the existing library to the name SQL Server expects.
+            sudo ln -sf /lib64/libldap_r-2.4.so.2 /lib64/libldap-2.4.so.2
             sudo ldconfig
-            ldconfig -p | grep libldap
 
 
             echo "==> Configuring SQL Server (Developer edition)..."
