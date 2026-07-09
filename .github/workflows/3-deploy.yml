@@ -70,10 +70,10 @@ jobs:
 
       # Produces a self-contained Linux executable that applies EF Core migrations
       # without needing the .NET SDK installed on the EC2 instance.
-      # NOTE: Requires the MySQL EF Core provider — see prerequisites above.
       - name: Build EF Core migration bundle
         run: |
           dotnet tool install --global dotnet-ef --version 10.0.9
+          export PATH="$PATH:$HOME/.dotnet/tools"
           dotnet ef migrations bundle \
             --project src/StoreCreditor.Data \
             --startup-project src/StoreCreditor.Web \
