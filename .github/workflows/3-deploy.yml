@@ -72,15 +72,31 @@ jobs:
       # without needing the .NET SDK installed on the EC2 instance.
       - name: Build EF Core migration bundle
         run: |
+          echo "=== .NET environment ==="
+          dotnet --version
+          dotnet --list-sdks
+          dotnet --list-runtimes
+
+          echo "=== Installing dotnet-ef globally ==="
           dotnet tool install --global dotnet-ef --version 10.0.9
           export PATH="$PATH:$HOME/.dotnet/tools"
+
+          echo "=== Verifying dotnet-ef binary ==="
+          which dotnet-ef || echo "dotnet-ef not found in PATH"
+          dotnet-ef --version || echo "dotnet-ef --version failed"
+
+          echo "=== Local tool manifest ==="
+          cat src/StoreCreditor.Web/dotnet-tools.json || echo "No local tool manifest found"
+
+          echo "=== Running migration bundle ==="
           dotnet-ef migrations bundle \
             --project src/StoreCreditor.Data \
             --startup-project src/StoreCreditor.Web \
             --self-contained \
             --runtime linux-x64 \
             --output ./migrationbundle \
-            --force
+            --force \
+            --verbose
 
       - name: Package deployment artifacts
         run: |
