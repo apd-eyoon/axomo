@@ -1,307 +1,195 @@
-name: 1. Provision EC2
-
-# Installs .NET 10 ASP.NET Core Runtime, SQL Server 2022, sqlcmd, Nginx, and
-# configures the systemd service on the EC2 instance. Run this once before
-# the first deploy, or after a teardown.
+# Workflow 1: Provision EC2 Infrastructure
 #
-# Targets: Ubuntu Server 24.04 LTS or 26.04 LTS (t3.medium or larger)
-#
-# SQL Server requires at least 2 GB RAM — do not run on t3.micro.
-#
-# Ubuntu 26.04 note: Microsoft typically lags several months behind new Ubuntu
-# releases for SQL Server packages. This workflow probes 26.04 → 24.04 → 22.04
-# and uses the first version that has a published repo (all are binary-compatible).
+# Run this once (or after major infra changes) to prepare the EC2 instance.
+# It installs the .NET 10 runtime, nginx, creates the systemd service unit,
+# and writes the RDS connection string into a root-owned environment file.
 #
 # Required GitHub Secrets:
-#   EC2_HOST        - Public IP or DNS of the EC2 instance
-#   EC2_SSH_KEY     - Contents of the .pem private key file
-#   DB_SA_PASSWORD  - Password for the SQL Server 'sa' account
-#                     (min 8 chars, mix of upper, lower, digit, symbol)
+#   EC2_HOST        — EC2 public IP or hostname
+#   EC2_USER        — SSH username (e.g. ubuntu)
+#   EC2_SSH_KEY     — Full PEM private key content
+#   RDS_HOST        — RDS MySQL endpoint
+#   RDS_PORT        — MySQL port (typically 3306)
+#   RDS_DATABASE    — Database name
+#   RDS_USER        — MySQL username
+#   RDS_PASSWORD    — MySQL password
+#
+# NOTE: The app currently uses Microsoft.EntityFrameworkCore.SqlServer and
+# Hangfire.SqlServer. To connect to RDS MySQL you must switch to:
+#   - Pomelo.EntityFrameworkCore.MySql  (replace UseSqlServer → UseMySql)
+#   - Hangfire.MySql (or Hangfire.MySqlStorage)  (replace UseSqlServerStorage)
+# and regenerate EF Core migrations for MySQL.
+
+name: "1 · Provision EC2"
 
 on:
   workflow_dispatch:
 
 jobs:
   provision:
-    name: Provision EC2 instance
+    name: Provision EC2 infrastructure
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install runtime, SQL Server, Nginx and configure services
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 40m
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-          script: |
-            set -euo pipefail
+      - name: Install .NET 10 ASP.NET Core runtime
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          if dotnet --list-runtimes 2>/dev/null | grep -q "Microsoft.AspNetCore.App 10"; then
+            echo "✓ .NET 10 runtime already installed"
+            exit 0
+          fi
+          UBUNTU_VERSION=$(lsb_release -rs)
+          wget -q "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb" \
+            -O /tmp/packages-microsoft-prod.deb
+          sudo dpkg -i /tmp/packages-microsoft-prod.deb
+          rm /tmp/packages-microsoft-prod.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y aspnetcore-runtime-10.0
+          echo "Installed: $(dotnet --list-runtimes | grep AspNetCore)"
+          ENDSSH
 
-            echo "==> Updating system packages..."
-            sudo apt-get update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+      - name: Install nginx and MySQL client tools
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo apt-get install -y nginx default-mysql-client
+          sudo systemctl enable nginx
+          sudo systemctl start nginx
+          echo "✓ nginx ready: $(nginx -v 2>&1)"
+          ENDSSH
 
-            sudo apt-get install -y \
-              curl \
-              wget \
-              unzip \
-              nginx \
-              gnupg \
-              ca-certificates \
-              apt-transport-https
+      - name: Create service user and directories
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          # Dedicated system user — no login shell, no home directory
+          sudo useradd --system --no-create-home --shell /bin/false storecreditor 2>/dev/null || true
+          sudo mkdir -p /var/www/storecreditor
+          sudo mkdir -p /etc/storecreditor
+          sudo chown storecreditor:storecreditor /var/www/storecreditor
+          echo "✓ Service user and directories ready"
+          ENDSSH
 
-            ############################################################
-            # Microsoft package repository
-            ############################################################
+      # Secrets are expanded on the runner and written to a temp file,
+      # then SCP'd to the instance. This keeps secrets out of SSH command lines.
+      - name: Write environment file
+        env:
+          RDS_HOST: ${{ secrets.RDS_HOST }}
+          RDS_PORT: ${{ secrets.RDS_PORT }}
+          RDS_DATABASE: ${{ secrets.RDS_DATABASE }}
+          RDS_USER: ${{ secrets.RDS_USER }}
+          RDS_PASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          {
+            echo "ASPNETCORE_ENVIRONMENT=Production"
+            echo "ASPNETCORE_URLS=http://localhost:5000"
+            echo "ConnectionStrings__DefaultConnection=Server=${RDS_HOST};Port=${RDS_PORT};Database=${RDS_DATABASE};User=${RDS_USER};Password=${RDS_PASSWORD};SslMode=Required;"
+          } > /tmp/storecreditor.env
 
-            echo "==> Installing Microsoft package repository..."
+          scp /tmp/storecreditor.env ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor.env
+          rm -f /tmp/storecreditor.env
 
-            UBUNTU_VERSION=$(lsb_release -rs)
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo mv /tmp/storecreditor.env /etc/storecreditor/environment
+          # 640: root owns, storecreditor group can read, world cannot
+          sudo chmod 640 /etc/storecreditor/environment
+          sudo chown root:storecreditor /etc/storecreditor/environment
+          echo "✓ Environment file installed at /etc/storecreditor/environment"
+          ENDSSH
 
-            wget "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb" \
-              -O packages-microsoft-prod.deb
-            sudo dpkg -i packages-microsoft-prod.deb
-            rm packages-microsoft-prod.deb
-            sudo apt-get update
+      - name: Install systemd service unit
+        run: |
+          cat > /tmp/storecreditor.service << 'EOF'
+          [Unit]
+          Description=StoreCreditor ASP.NET Core Application
+          After=network.target
 
-            ############################################################
-            # .NET 10 ASP.NET Runtime
-            ############################################################
+          [Service]
+          Type=simple
+          User=storecreditor
+          Group=storecreditor
+          WorkingDirectory=/var/www/storecreditor
+          ExecStart=/usr/bin/dotnet /var/www/storecreditor/StoreCreditor.Web.dll
+          Restart=on-failure
+          RestartSec=10
+          KillSignal=SIGINT
+          SyslogIdentifier=storecreditor
+          EnvironmentFile=/etc/storecreditor/environment
+          NoNewPrivileges=true
+          PrivateTmp=true
 
-            echo "==> Installing ASP.NET Core Runtime 10..."
-            sudo apt-get install -y aspnetcore-runtime-10.0
-            dotnet --info
+          [Install]
+          WantedBy=multi-user.target
+          EOF
 
-            ############################################################
-            # SQL Server 2022
-            # Falls back to the 24.04 repo if 26.04 packages are not yet
-            # published by Microsoft.
-            ############################################################
+          scp /tmp/storecreditor.service ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor.service
+          rm -f /tmp/storecreditor.service
 
-            echo "==> Adding SQL Server 2022 repository..."
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo mv /tmp/storecreditor.service /etc/systemd/system/storecreditor.service
+          sudo chmod 644 /etc/systemd/system/storecreditor.service
+          sudo systemctl daemon-reload
+          sudo systemctl enable storecreditor
+          echo "✓ systemd service registered and enabled"
+          ENDSSH
 
-            # Save to trusted.gpg.d so apt trusts it automatically without
-            # requiring a signed-by= directive in the downloaded .list files.
-            curl https://packages.microsoft.com/keys/microsoft.asc \
-              | sudo gpg --dearmor \
-              | sudo tee /etc/apt/trusted.gpg.d/microsoft.gpg > /dev/null
+      # The map directive handles both plain HTTP keep-alive and WebSocket upgrades,
+      # which is required for Blazor Server SignalR connections.
+      - name: Configure nginx reverse proxy
+        run: |
+          cat > /tmp/storecreditor.nginx << 'EOF'
+          map $http_upgrade $connection_upgrade {
+              default upgrade;
+              ''      close;
+          }
 
-            # Probe Ubuntu versions in order until we find a working SQL Server 2022 repo.
-            # Microsoft typically supports a limited set of Ubuntu LTS versions; new releases
-            # often lag by several months. The 22.04 repo is the last known-stable fallback.
-            MSSQL_UBUNTU_VER=""
-            for ver in "${UBUNTU_VERSION}" "24.04" "22.04"; do
-              if curl -fsI "https://packages.microsoft.com/config/ubuntu/${ver}/mssql-server-2022.list" \
-                   > /dev/null 2>&1; then
-                MSSQL_UBUNTU_VER="${ver}"
-                [ "${ver}" != "${UBUNTU_VERSION}" ] && \
-                  echo "  No SQL Server 2022 repo for Ubuntu ${UBUNTU_VERSION}; using ${ver} repo (binary-compatible)."
-                break
-              fi
-              echo "  No SQL Server 2022 repo for Ubuntu ${ver}."
-            done
+          server {
+              listen 80;
+              server_name _;
 
-            if [ -z "${MSSQL_UBUNTU_VER}" ]; then
-              echo "ERROR: No SQL Server 2022 apt repo found (tried ${UBUNTU_VERSION}, 24.04, 22.04)."
-              exit 1
-            fi
+              client_max_body_size 50M;
 
-            curl -f "https://packages.microsoft.com/config/ubuntu/${MSSQL_UBUNTU_VER}/mssql-server-2022.list" \
-              | sudo tee /etc/apt/sources.list.d/mssql-server.list
+              location / {
+                  proxy_pass         http://127.0.0.1:5000;
+                  proxy_http_version 1.1;
 
-            sudo apt-get update
+                  # WebSocket / Blazor SignalR
+                  proxy_set_header   Upgrade           $http_upgrade;
+                  proxy_set_header   Connection        $connection_upgrade;
 
-            echo "==> Installing SQL Server 2022..."
-            sudo ACCEPT_EULA=Y apt-get install -y mssql-server
+                  # Forward original request context to ASP.NET Core
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
 
-            echo "==> Installing SQL Server runtime library dependencies..."
-            # mssql-server was compiled for Ubuntu 22.04 (OpenLDAP 2.5) and requires
-            # liblber-2.5.so.0 at runtime. On Ubuntu 26.04, libldap-2.5-0 has been
-            # replaced by libldap-2.6-0. Install it if available; otherwise create a
-            # compatibility symlink from whatever OpenLDAP version the OS provides.
-            if apt-cache show libldap-2.5-0 2>/dev/null | grep -q '^Package:'; then
-              sudo apt-get install -y libldap-2.5-0
-            else
-              sudo apt-get install -y libldap2 2>/dev/null || true
-              # OpenLDAP 2.5 used versioned sonames (liblber-2.5.so.0).
-              # OpenLDAP 2.6+ switched to unversioned sonames (liblber.so.2).
-              # Try each known filename in preference order and symlink the first match.
-              LIB_DIR="/usr/lib/x86_64-linux-gnu"
-              for lib in liblber libldap; do
-                target="${LIB_DIR}/${lib}-2.5.so.0"
-                if [ -e "${target}" ]; then continue; fi
-                for candidate in "${lib}.so.2" "${lib}-2.6.so.0" "${lib}.so.0"; do
-                  if [ -e "${LIB_DIR}/${candidate}" ]; then
-                    echo "  Linking ${candidate} -> ${lib}-2.5.so.0"
-                    sudo ln -sf "${LIB_DIR}/${candidate}" "${target}"
-                    break
-                  fi
-                done
-                [ ! -e "${target}" ] && \
-                  echo "WARNING: no source found for ${lib}-2.5.so.0 — SQL Server may not start"
-              done
-              sudo ldconfig
-            fi
+                  proxy_read_timeout 300s;
+                  proxy_cache_bypass $http_upgrade;
+              }
+          }
+          EOF
 
-            echo "==> Configuring SQL Server..."
-            sudo MSSQL_SA_PASSWORD="${{ secrets.DB_SA_PASSWORD }}" \
-              MSSQL_PID=Developer \
-              ACCEPT_EULA=Y \
-              /opt/mssql/bin/mssql-conf -n setup
+          scp /tmp/storecreditor.nginx ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor.nginx
+          rm -f /tmp/storecreditor.nginx
 
-            sudo systemctl enable mssql-server
-            sudo systemctl start mssql-server
-
-            echo "==> Waiting for SQL Server to start..."
-            SQL_STARTED=0
-            for i in $(seq 1 30); do
-              if sudo systemctl is-active --quiet mssql-server; then
-                echo "SQL Server is running."
-                SQL_STARTED=1
-                break
-              fi
-              echo "  Waiting... ($i/30)"
-              sleep 5
-            done
-
-            if [ "$SQL_STARTED" -eq 0 ]; then
-              echo "ERROR: SQL Server failed to start."
-              sudo systemctl status mssql-server --no-pager || true
-              sudo journalctl -u mssql-server --no-pager -n 100 || true
-              sudo cat /var/opt/mssql/log/errorlog || true
-              exit 1
-            fi
-
-            ############################################################
-            # sqlcmd
-            ############################################################
-
-            echo "==> Installing sqlcmd..."
-
-            # Use the same resolved version for the sqlcmd tools repo.
-            # If that version also lacks a prod.list, fall back the same way.
-            PROD_UBUNTU_VER=""
-            for ver in "${MSSQL_UBUNTU_VER}" "24.04" "22.04"; do
-              if curl -fsI "https://packages.microsoft.com/config/ubuntu/${ver}/prod.list" \
-                   > /dev/null 2>&1; then
-                PROD_UBUNTU_VER="${ver}"
-                break
-              fi
-            done
-
-            if [ -z "${PROD_UBUNTU_VER}" ]; then
-              echo "ERROR: No sqlcmd apt repo found (tried ${MSSQL_UBUNTU_VER}, 24.04, 22.04)."
-              exit 1
-            fi
-
-            curl -f "https://packages.microsoft.com/config/ubuntu/${PROD_UBUNTU_VER}/prod.list" \
-              | sudo tee /etc/apt/sources.list.d/msprod.list
-
-            sudo apt-get update
-
-            sudo ACCEPT_EULA=Y apt-get install -y \
-              mssql-tools18 \
-              unixodbc-dev
-
-            echo 'export PATH="$PATH:/opt/mssql-tools18/bin"' \
-              | sudo tee /etc/profile.d/mssql-tools.sh > /dev/null
-
-            ############################################################
-            # Application directories and secrets file
-            ############################################################
-
-            echo "==> Creating application directories..."
-
-            sudo mkdir -p /opt/storecreditor
-            sudo chown ubuntu:ubuntu /opt/storecreditor
-
-            sudo mkdir -p /etc/storecreditor
-            sudo chown ubuntu:ubuntu /etc/storecreditor
-            sudo chmod 700 /etc/storecreditor
-
-            sudo touch /etc/storecreditor/environment
-            sudo chmod 600 /etc/storecreditor/environment
-            sudo chown ubuntu:ubuntu /etc/storecreditor/environment
-
-            ############################################################
-            # systemd service
-            ############################################################
-
-            echo "==> Creating systemd service..."
-
-            sudo tee /etc/systemd/system/storecreditor.service > /dev/null <<'SERVICE'
-            [Unit]
-            Description=StoreCreditor ASP.NET Core Application
-            After=network.target mssql-server.service
-            Requires=mssql-server.service
-
-            [Service]
-            WorkingDirectory=/opt/storecreditor
-            ExecStart=/usr/bin/dotnet /opt/storecreditor/StoreCreditor.Web.dll
-            Restart=always
-            RestartSec=10
-            KillSignal=SIGINT
-            SyslogIdentifier=storecreditor
-            User=ubuntu
-            EnvironmentFile=/etc/storecreditor/environment
-
-            [Install]
-            WantedBy=multi-user.target
-            SERVICE
-
-            sudo systemctl daemon-reload
-
-            ############################################################
-            # Nginx reverse proxy
-            ############################################################
-
-            echo "==> Configuring Nginx..."
-
-            sudo rm -f /etc/nginx/sites-enabled/default
-
-            sudo tee /etc/nginx/sites-available/storecreditor > /dev/null <<'NGINX'
-            server {
-                listen 80;
-                server_name _;
-
-                client_max_body_size 50M;
-
-                location / {
-                    proxy_pass http://localhost:5000;
-                    proxy_http_version 1.1;
-
-                    proxy_set_header Upgrade $http_upgrade;
-                    proxy_set_header Connection "keep-alive";
-                    proxy_set_header Host $host;
-                    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto $scheme;
-
-                    proxy_cache_bypass $http_upgrade;
-                    proxy_read_timeout 90;
-                }
-            }
-            NGINX
-
-            sudo ln -sf \
-              /etc/nginx/sites-available/storecreditor \
-              /etc/nginx/sites-enabled/storecreditor
-
-            sudo nginx -t
-
-            sudo systemctl enable nginx
-            sudo systemctl restart nginx
-
-            ############################################################
-            # Done
-            ############################################################
-
-            echo ""
-            echo "=========================================="
-            echo " Provisioning complete."
-            echo " .NET 10 Runtime:  installed"
-            echo " SQL Server 2022:  installed and running"
-            echo " sqlcmd:           installed"
-            echo " Nginx:            configured"
-            echo " Ready for deployment"
-            echo "=========================================="
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo mv /tmp/storecreditor.nginx /etc/nginx/sites-available/storecreditor
+          sudo ln -sf /etc/nginx/sites-available/storecreditor /etc/nginx/sites-enabled/storecreditor
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo nginx -t
+          sudo systemctl reload nginx
+          echo "✓ nginx configured and reloaded"
+          echo ""
+          echo "Provisioning complete. Run workflow '3 · Build & Deploy' to deploy the app."
+          ENDSSH

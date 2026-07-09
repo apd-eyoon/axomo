@@ -1,82 +1,91 @@
-name: 2. Teardown EC2
-
-# Completely removes the app, SQL Server, .NET runtime, sqlcmd, and Nginx
-# config from the EC2 instance, returning it to a clean state. Run the
-# Provision workflow afterward to set it up again.
+# Workflow 2: Teardown Application
 #
-# WARNING: This permanently deletes all SQL Server data on the instance.
-#
-# Targets: Ubuntu Server 24.04 LTS or 26.04 LTS
+# Stops and removes the deployed application from the EC2 instance without
+# touching the runtime, nginx install, or the environment/secrets file.
+# Run this before re-provisioning or making infrastructure changes, then
+# follow up with workflow 3 to redeploy.
 #
 # Required GitHub Secrets:
-#   EC2_HOST    - Public IP or DNS of the EC2 instance
-#   EC2_SSH_KEY - Contents of the .pem private key file
+#   EC2_HOST    — EC2 public IP or hostname
+#   EC2_USER    — SSH username (e.g. ubuntu)
+#   EC2_SSH_KEY — Full PEM private key content
+
+name: "2 · Teardown Application"
 
 on:
   workflow_dispatch:
 
 jobs:
   teardown:
-    name: Teardown EC2 instance
+    name: Stop and remove deployed application
     runs-on: ubuntu-latest
 
     steps:
-      - name: Remove all deployed components
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 20m
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-          script: |
-            set -uo pipefail
+      - name: Stop and disable systemd service
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          if systemctl is-active --quiet storecreditor; then
+            sudo systemctl stop storecreditor
+            echo "✓ Service stopped"
+          else
+            echo "Service was not running"
+          fi
+          if systemctl is-enabled --quiet storecreditor 2>/dev/null; then
+            sudo systemctl disable storecreditor
+            echo "✓ Service disabled"
+          fi
+          ENDSSH
 
-            echo "==> Stopping and removing app service..."
-            sudo systemctl stop storecreditor || true
-            sudo systemctl disable storecreditor || true
-            sudo rm -f /etc/systemd/system/storecreditor.service
+      - name: Remove application files
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo rm -rf /var/www/storecreditor/*
+          echo "✓ Application files removed from /var/www/storecreditor"
+          ENDSSH
+
+      - name: Remove systemd service unit
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          if [ -f /etc/systemd/system/storecreditor.service ]; then
+            sudo rm /etc/systemd/system/storecreditor.service
             sudo systemctl daemon-reload
-            sudo systemctl reset-failed || true
+            echo "✓ systemd unit removed"
+          else
+            echo "No systemd unit found, skipping"
+          fi
+          ENDSSH
 
-            echo "==> Removing app files and secrets..."
-            sudo rm -rf /opt/storecreditor
-            sudo rm -rf /etc/storecreditor
+      - name: Remove nginx site configuration
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo rm -f /etc/nginx/sites-enabled/storecreditor
+          sudo rm -f /etc/nginx/sites-available/storecreditor
+          # Restore the default nginx site so the server isn't serving a blank 404
+          if [ -f /etc/nginx/sites-available/default ]; then
+            sudo ln -sf /etc/nginx/sites-available/default /etc/nginx/sites-enabled/default
+          fi
+          sudo nginx -t
+          sudo systemctl reload nginx
+          echo "✓ nginx site config removed and nginx reloaded"
+          ENDSSH
 
-            echo "==> Stopping SQL Server..."
-            sudo systemctl stop mssql-server || true
-            sudo systemctl disable mssql-server || true
-
-            echo "==> Uninstalling SQL Server packages..."
-            sudo apt-get remove -y mssql-server || true
-            sudo apt-get autoremove -y || true
-
-            echo "==> Removing SQL Server data and config..."
-            sudo rm -rf /var/opt/mssql
-            sudo rm -f /etc/apt/sources.list.d/mssql-server.list
-
-            echo "==> Removing .NET runtime..."
-            sudo apt-get remove -y aspnetcore-runtime-10.0 || true
-            sudo apt-get autoremove -y || true
-
-            echo "==> Removing sqlcmd..."
-            sudo ACCEPT_EULA=Y apt-get remove -y mssql-tools18 unixodbc-dev || true
-            sudo rm -f /etc/apt/sources.list.d/msprod.list
-            sudo rm -f /usr/share/keyrings/microsoft.gpg
-            sudo rm -f /etc/profile.d/mssql-tools.sh
-
-            echo "==> Removing Microsoft package repository..."
-            sudo apt-get remove -y packages-microsoft-prod || true
-            sudo apt-get autoremove -y || true
-
-            echo "==> Removing Nginx app config..."
-            sudo rm -f /etc/nginx/sites-enabled/storecreditor
-            sudo rm -f /etc/nginx/sites-available/storecreditor
-            sudo nginx -t && sudo systemctl reload nginx || true
-
-            echo ""
-            echo "==========================================="
-            echo " Teardown complete."
-            echo " The instance is clean. Run the Provision"
-            echo " workflow to set it up again."
-            echo "==========================================="
+      - name: Summary
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          echo "Teardown complete."
+          echo "  Preserved: .NET runtime, nginx, /etc/storecreditor/environment"
+          echo "  Removed:   application files, systemd unit, nginx site config"
+          echo ""
+          echo "To redeploy: run workflow '1 · Provision EC2' then '3 · Build & Deploy'."
+          ENDSSH

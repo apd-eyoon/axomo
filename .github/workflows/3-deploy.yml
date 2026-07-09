@@ -1,184 +1,175 @@
-name: 3. Deploy to EC2
-
-# Triggered on every push to main. Publishes the ASP.NET Core app, generates
-# an idempotent EF Core migration script, copies everything to the EC2
-# instance, writes production secrets, runs migrations against the local SQL
-# Server instance, and restarts the systemd service.
+# Workflow 3: Build and Deploy
 #
-# The Provision workflow must have been run at least once before this.
+# Builds the app in Release mode, publishes it, runs EF Core database migrations
+# via a self-contained migration bundle, then deploys to the EC2 instance and
+# restarts the systemd service. The app is then accessible at http://<EC2_HOST>.
+#
+# Trigger: push to main, or manually via workflow_dispatch.
 #
 # Required GitHub Secrets:
-#   EC2_HOST              - Public IP or DNS of the EC2 instance
-#   EC2_SSH_KEY           - Contents of the .pem private key file
-#   DB_SA_PASSWORD        - SQL Server 'sa' password (set during provisioning)
+#   EC2_HOST        — EC2 public IP or hostname
+#   EC2_USER        — SSH username (e.g. ubuntu)
+#   EC2_SSH_KEY     — Full PEM private key content
+#   RDS_HOST        — RDS MySQL endpoint (used when running migrations)
+#   RDS_PORT        — MySQL port (typically 3306)
+#   RDS_DATABASE    — Database name
+#   RDS_USER        — MySQL username
+#   RDS_PASSWORD    — MySQL password
 #
-#   BAMBOOHR_API_KEY      - BambooHR API key
+# PREREQUISITES:
+#   1. Run workflow '1 · Provision EC2' at least once before deploying.
+#   2. MYSQL PROVIDER SWITCH REQUIRED: This app uses Microsoft.EntityFrameworkCore.SqlServer
+#      and Hangfire.SqlServer. Before the migration bundle and DB connections will work
+#      against RDS MySQL, you must:
+#        a) Replace Microsoft.EntityFrameworkCore.SqlServer with Pomelo.EntityFrameworkCore.MySql
+#        b) Change UseSqlServer(...) → UseMySql(..., ServerVersion.AutoDetect(...)) in Program.cs
+#        c) Replace Hangfire.SqlServer with Hangfire.MySql (or similar MySQL storage)
+#        d) Change UseSqlServerStorage(...) → UseMysqlStorage(...) in Program.cs
+#        e) Delete existing Migrations/ folder and run: dotnet ef migrations add InitialCreate
 #
-#   AXOMO_API_KEY         - Axomo API key
-#   AXOMO_BEARER_TOKEN    - Axomo bearer token
-#
-# Optional secrets (only needed if Microsoft Entra ID SSO is enabled):
-#   ENTRA_TENANT_ID       - Azure AD / Entra tenant ID
-#   ENTRA_CLIENT_ID       - Entra app registration client ID
-#   ENTRA_CLIENT_SECRET   - Entra app registration client secret
+# HTTPS / COOKIE NOTE:
+#   The app sets CookieSecurePolicy.Always, so authentication cookies require HTTPS.
+#   If you are accessing via plain HTTP over a private network, change the cookie policy
+#   in Program.cs to CookieSecurePolicy.SameAsRequest, or set up SSL termination in nginx
+#   (e.g. via certbot: sudo certbot --nginx -d your-domain.com).
+
+name: "3 · Build & Deploy"
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+  workflow_dispatch:
 
 jobs:
-  deploy:
-    name: Build and deploy
+  build-and-deploy:
+    name: Build, migrate, and deploy
     runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout ──────────────────────────────────────────────────────────
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # ── 2. Setup .NET SDK (needed to publish + generate migration script) ───
       - name: Setup .NET 10 SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
-          include-prerelease: true
+          dotnet-version: "10.0.x"
 
-      # ── 3. Restore tools (dotnet-ef lives in dotnet-tools.json) ─────────────
-      - name: Restore local tools
-        run: dotnet tool restore
-
-      # ── 4. Restore NuGet packages ────────────────────────────────────────────
       - name: Restore dependencies
         run: dotnet restore StoreCreditor.sln
 
-      # ── 5. Publish the web project ───────────────────────────────────────────
+      - name: Build
+        run: dotnet build StoreCreditor.sln -c Release --no-restore
+
       - name: Publish
         run: |
           dotnet publish src/StoreCreditor.Web/StoreCreditor.Web.csproj \
-            --configuration Release \
-            --output ./publish \
-            --runtime linux-x64 \
-            --self-contained false \
-            --no-restore
+            -c Release \
+            --no-build \
+            -o ./publish
 
-      # ── 6. Generate idempotent EF migration SQL script ───────────────────────
-      # Idempotent means it is safe to run on a DB that already has some
-      # migrations applied — it only applies the ones that are missing.
-      - name: Generate EF migration script
+      # Produces a self-contained Linux executable that applies EF Core migrations
+      # without needing the .NET SDK installed on the EC2 instance.
+      # NOTE: Requires the MySQL EF Core provider — see prerequisites above.
+      - name: Build EF Core migration bundle
         run: |
-          dotnet ef migrations script \
-            --idempotent \
-            --project src/StoreCreditor.Data/StoreCreditor.Data.csproj \
-            --startup-project src/StoreCreditor.Web/StoreCreditor.Web.csproj \
-            --output ./publish/migrate.sql \
-            --no-build
-        env:
-          # Placeholder connection string — only needed so the startup project
-          # can initialise at design time. Not used against a real database.
-          ConnectionStrings__DefaultConnection: "Server=localhost;Database=StoreCreditor;User ID=sa;Password=placeholder;TrustServerCertificate=True"
+          dotnet tool install --global dotnet-ef --version 10.0.9
+          dotnet ef migrations bundle \
+            --project src/StoreCreditor.Data \
+            --startup-project src/StoreCreditor.Web \
+            --self-contained \
+            --runtime linux-x64 \
+            --output ./migrationbundle \
+            --force
 
-      # ── 7. Copy published output to EC2 ─────────────────────────────────────
-      - name: Copy app to EC2
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "./publish/*"
-          target: "/opt/storecreditor"
-          strip_components: 1
-          rm: true
+      - name: Package deployment artifacts
+        run: |
+          tar -czf storecreditor-deploy.tar.gz -C ./publish .
 
-      # ── 8. Write secrets, run migrations, restart service ───────────────────
-      - name: Configure and restart application
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ubuntu
-          key: ${{ secrets.EC2_SSH_KEY }}
-          command_timeout: 15m
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
-          script: |
-            set -euo pipefail
+      - name: Upload artifacts to EC2
+        run: |
+          scp storecreditor-deploy.tar.gz \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor-deploy.tar.gz
+          scp migrationbundle \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/migrationbundle
 
-            # ── Write environment file ───────────────────────────────────────
-            # ${{ secrets.* }} expressions are substituted by GitHub Actions
-            # before this script is sent to the instance. The quoted heredoc
-            # (<<'ENVEOF') prevents the remote shell from doing a second round
-            # of $ expansion on those already-substituted literal values.
-            echo "==> Writing production environment file..."
-            cat > /etc/storecreditor/environment <<'ENVEOF'
-            ASPNETCORE_ENVIRONMENT=Production
-            ASPNETCORE_URLS=http://localhost:5000
-            ConnectionStrings__DefaultConnection=Server=localhost;Database=StoreCreditor;User ID=sa;Password=${{ secrets.DB_SA_PASSWORD }};TrustServerCertificate=True;MultipleActiveResultSets=True
-            BambooHR__ApiKey=${{ secrets.BAMBOOHR_API_KEY }}
-            Axomo__ApiKey=${{ secrets.AXOMO_API_KEY }}
-            Axomo__BearerToken=${{ secrets.AXOMO_BEARER_TOKEN }}
-            MicrosoftEntraId__TenantId=${{ secrets.ENTRA_TENANT_ID }}
-            MicrosoftEntraId__ClientId=${{ secrets.ENTRA_CLIENT_ID }}
-            MicrosoftEntraId__ClientSecret=${{ secrets.ENTRA_CLIENT_SECRET }}
-            MicrosoftEntraId__RedirectUri=http://${{ secrets.EC2_HOST }}/signin-oidc
-            MicrosoftEntraId__PostLogoutRedirectUri=http://${{ secrets.EC2_HOST }}/Identity/Account/Login
-            ENVEOF
+      - name: Stop service before deployment
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          if systemctl is-active --quiet storecreditor; then
+            sudo systemctl stop storecreditor
+            echo "✓ Service stopped"
+          else
+            echo "Service was not running"
+          fi
+          ENDSSH
 
-            chmod 600 /etc/storecreditor/environment
+      - name: Deploy application files
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo rm -rf /var/www/storecreditor/*
+          sudo tar -xzf /tmp/storecreditor-deploy.tar.gz -C /var/www/storecreditor
+          sudo chown -R storecreditor:storecreditor /var/www/storecreditor
+          sudo chmod -R 755 /var/www/storecreditor
+          rm -f /tmp/storecreditor-deploy.tar.gz
+          echo "✓ Application files deployed to /var/www/storecreditor"
+          ENDSSH
 
-            # ── Wait for SQL Server to accept connections ────────────────────
-            echo "==> Waiting for SQL Server..."
-            export PATH="$PATH:/opt/mssql-tools18/bin"
+      # The migration bundle reads the connection string from the environment file
+      # written by workflow 1. It is self-contained and does not need the SDK.
+      - name: Run database migrations
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo chmod +x /tmp/migrationbundle
+          # Source the environment file to get the connection string, then run migrations
+          sudo bash -c '
+            set -a
+            source /etc/storecreditor/environment
+            set +a
+            /tmp/migrationbundle
+          '
+          rm -f /tmp/migrationbundle
+          echo "✓ Migrations applied"
+          ENDSSH
 
-            SQL_READY=0
-            for i in $(seq 1 12); do
-              if sqlcmd -S localhost -U sa -P '${{ secrets.DB_SA_PASSWORD }}' \
-                   -Q "SELECT 1" -C -l 5 > /dev/null 2>&1; then
-                echo "SQL Server is accepting connections."
-                SQL_READY=1
-                break
-              fi
-              echo "  Waiting... ($i/12)"
-              sleep 5
-            done
+      - name: Start service
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo systemctl start storecreditor
+          # Wait a moment and verify the service came up
+          sleep 5
+          if systemctl is-active --quiet storecreditor; then
+            echo "✓ storecreditor service is running"
+          else
+            echo "ERROR: Service failed to start. Checking logs..."
+            sudo journalctl -u storecreditor -n 50 --no-pager
+            exit 1
+          fi
+          ENDSSH
 
-            if [ "$SQL_READY" -eq 0 ]; then
-              echo "ERROR: SQL Server did not become ready after 60 seconds."
-              sudo systemctl status mssql-server --no-pager || true
-              sudo journalctl -u mssql-server --no-pager -n 50 || true
-              exit 1
-            fi
-
-            # ── Ensure the application database exists ───────────────────────
-            echo "==> Ensuring StoreCreditor database exists..."
-            sqlcmd -S localhost -U sa -P '${{ secrets.DB_SA_PASSWORD }}' -C \
-              -Q "IF NOT EXISTS (SELECT name FROM sys.databases WHERE name = 'StoreCreditor') CREATE DATABASE StoreCreditor;"
-
-            # ── Run EF migrations ────────────────────────────────────────────
-            echo "==> Running database migrations..."
-            sqlcmd \
-              -S localhost \
-              -U sa \
-              -P '${{ secrets.DB_SA_PASSWORD }}' \
-              -d StoreCreditor \
-              -i /opt/storecreditor/migrate.sql \
-              -C \
-              -b
-
-            echo "Migrations complete."
-
-            # ── Restart the app service ──────────────────────────────────────
-            echo "==> Restarting storecreditor service..."
-            sudo systemctl restart storecreditor
-            sudo systemctl enable storecreditor
-
-            # Give the app a few seconds to start, then verify it is running
-            sleep 5
-            if sudo systemctl is-active --quiet storecreditor; then
-              echo ""
-              echo "==========================================="
-              echo " Deploy successful."
-              echo " App is running at http://${{ secrets.EC2_HOST }}"
-              echo "==========================================="
-            else
-              echo "ERROR: Service failed to start. Showing last 50 log lines:"
-              sudo journalctl -u storecreditor -n 50 --no-pager
-              exit 1
-            fi
+      - name: Smoke test
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://localhost:5000/ || echo "000")
+          echo "HTTP response from localhost:5000 → ${HTTP_CODE}"
+          if [ "${HTTP_CODE}" = "000" ]; then
+            echo "ERROR: App did not respond"
+            sudo journalctl -u storecreditor -n 30 --no-pager
+            exit 1
+          fi
+          echo "✓ App is responding"
+          echo ""
+          echo "Deployment complete. Access the app at: http://${{ secrets.EC2_HOST }}"
+          ENDSSH
