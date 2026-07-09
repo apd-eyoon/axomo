@@ -88,6 +88,9 @@ jobs:
           echo "=== Local tool manifest ==="
           cat src/StoreCreditor.Web/dotnet-tools.json || echo "No local tool manifest found"
 
+          echo "=== Restoring with linux-x64 runtime for migration bundle ==="
+          dotnet restore StoreCreditor.sln --runtime linux-x64
+
           echo "=== Running migration bundle ==="
           dotnet-ef migrations bundle \
             --project src/StoreCreditor.Data \
