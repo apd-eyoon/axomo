@@ -10,22 +10,14 @@
 #   EC2_HOST        — EC2 public IP or hostname
 #   EC2_USER        — SSH username (e.g. ubuntu)
 #   EC2_SSH_KEY     — Full PEM private key content
-#   RDS_HOST        — RDS MySQL endpoint (used when running migrations)
-#   RDS_PORT        — MySQL port (typically 3306)
+#   RDS_HOST        — RDS SQL Server endpoint
+#   RDS_PORT        — SQL Server port (typically 1433)
 #   RDS_DATABASE    — Database name
-#   RDS_USER        — MySQL username
-#   RDS_PASSWORD    — MySQL password
+#   RDS_USER        — SQL Server username
+#   RDS_PASSWORD    — SQL Server password
 #
 # PREREQUISITES:
 #   1. Run workflow '1 · Provision EC2' at least once before deploying.
-#   2. MYSQL PROVIDER SWITCH REQUIRED: This app uses Microsoft.EntityFrameworkCore.SqlServer
-#      and Hangfire.SqlServer. Before the migration bundle and DB connections will work
-#      against RDS MySQL, you must:
-#        a) Replace Microsoft.EntityFrameworkCore.SqlServer with Pomelo.EntityFrameworkCore.MySql
-#        b) Change UseSqlServer(...) → UseMySql(..., ServerVersion.AutoDetect(...)) in Program.cs
-#        c) Replace Hangfire.SqlServer with Hangfire.MySql (or similar MySQL storage)
-#        d) Change UseSqlServerStorage(...) → UseMysqlStorage(...) in Program.cs
-#        e) Delete existing Migrations/ folder and run: dotnet ef migrations add InitialCreate
 #
 # HTTPS / COOKIE NOTE:
 #   The app sets CookieSecurePolicy.Always, so authentication cookies require HTTPS.

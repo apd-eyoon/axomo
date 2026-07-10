@@ -14,11 +14,8 @@
 #   RDS_USER        — MySQL username
 #   RDS_PASSWORD    — MySQL password
 #
-# NOTE: The app currently uses Microsoft.EntityFrameworkCore.SqlServer and
-# Hangfire.SqlServer. To connect to RDS MySQL you must switch to:
-#   - Pomelo.EntityFrameworkCore.MySql  (replace UseSqlServer → UseMySql)
-#   - Hangfire.MySql (or Hangfire.MySqlStorage)  (replace UseSqlServerStorage)
-# and regenerate EF Core migrations for MySQL.
+# NOTE: The app uses Microsoft.EntityFrameworkCore.SqlServer and Hangfire.SqlServer,
+# targeting RDS SQL Server. No provider changes are needed.
 
 name: "1 · Provision EC2"
 
@@ -56,11 +53,11 @@ jobs:
           echo "Installed: $(dotnet --list-runtimes | grep AspNetCore)"
           ENDSSH
 
-      - name: Install nginx and MySQL client tools
+      - name: Install nginx
         run: |
           ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
           set -euo pipefail
-          sudo apt-get install -y nginx default-mysql-client
+          sudo apt-get install -y nginx
           sudo systemctl enable nginx
           sudo systemctl start nginx
           echo "✓ nginx ready: $(nginx -v 2>&1)"
@@ -71,7 +68,15 @@ jobs:
           ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
           set -euo pipefail
           # Dedicated system user — no login shell, no home directory
-          sudo useradd --system --no-create-home --shell /bin/false storecreditor 2>/dev/null || true
+          if id storecreditor > /dev/null 2>&1; then
+            echo "✓ Service user 'storecreditor' already exists"
+          else
+            if ! sudo useradd --system --no-create-home --shell /bin/false storecreditor; then
+              echo "ERROR: failed to create service user 'storecreditor'" >&2
+              exit 1
+            fi
+            echo "✓ Service user 'storecreditor' created"
+          fi
           sudo mkdir -p /var/www/storecreditor
           sudo mkdir -p /etc/storecreditor
           sudo chown storecreditor:storecreditor /var/www/storecreditor
@@ -91,7 +96,7 @@ jobs:
           {
             echo "ASPNETCORE_ENVIRONMENT=Production"
             echo "ASPNETCORE_URLS=http://localhost:5000"
-            echo "ConnectionStrings__DefaultConnection=Server=${RDS_HOST};Port=${RDS_PORT};Database=${RDS_DATABASE};User=${RDS_USER};Password=${RDS_PASSWORD};SslMode=Required;"
+            echo "ConnectionStrings__DefaultConnection=Server=${RDS_HOST},${RDS_PORT};Database=${RDS_DATABASE};User Id=${RDS_USER};Password=${RDS_PASSWORD};Encrypt=True;TrustServerCertificate=False;"
           } > /tmp/storecreditor.env
 
           scp /tmp/storecreditor.env ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor.env
