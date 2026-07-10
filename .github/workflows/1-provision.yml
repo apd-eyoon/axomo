@@ -96,7 +96,7 @@ jobs:
           {
             echo "ASPNETCORE_ENVIRONMENT=Production"
             echo "ASPNETCORE_URLS=http://localhost:5000"
-            echo "ConnectionStrings__DefaultConnection=\"Server=${RDS_HOST},${RDS_PORT};Database=${RDS_DATABASE};User Id=${RDS_USER};Password=${RDS_PASSWORD};Encrypt=True;TrustServerCertificate=False;\""
+            echo "ConnectionStrings__DefaultConnection=\"Server=${RDS_HOST},${RDS_PORT};Database=${RDS_DATABASE};User Id=${RDS_USER};Password=${RDS_PASSWORD};Encrypt=True;TrustServerCertificate=True;\""
           } > /tmp/storecreditor.env
 
           scp /tmp/storecreditor.env ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor.env
