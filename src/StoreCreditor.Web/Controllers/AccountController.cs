@@ -48,6 +48,7 @@ public sealed class AccountController(
         {
             UserName = model.Email,
             Email = model.Email,
+            EmailConfirmed = true,
             DisplayName = model.DisplayName,
             TwoFactorEnabled = authenticationOptions.CurrentValue.UseOtp
         };
@@ -66,16 +67,6 @@ public sealed class AccountController(
         }
 
         await userManager.AddToRoleAsync(user, role);
-
-        var token = await userManager.GenerateEmailConfirmationTokenAsync(user);
-        var encodedToken = WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(token));
-        var callbackUrl = Url.ActionLink(nameof(ConfirmEmail), "Account", new { userId = user.Id, token = encodedToken });
-        await emailService.SendEmailAsync(user.Email!, "Confirm your StoreCreditor account", $"Confirm your account: <a href=\"{callbackUrl}\">confirm email</a>", cancellationToken);
-
-        if (environment.IsDevelopment())
-        {
-            ViewBag.ConfirmationLink = callbackUrl;
-        }
 
         logger.LogInformation("Registered StoreCreditor user {Email}.", model.Email);
         return View("RegisterConfirmation");

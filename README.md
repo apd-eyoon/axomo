@@ -39,7 +39,7 @@ sql/
 
 - .NET 10 / ASP.NET Core MVC
 - Blazor Server
-- ASP.NET Core Identity with email confirmation, email OTP two-factor, reset, lockout
+- ASP.NET Core Identity with email OTP two-factor, reset, lockout
 - Entity Framework Core 10 with SQL Server
 - Hangfire with SQL Server storage
 - Polly retry policies for outbound HTTP
@@ -65,7 +65,7 @@ Both schedules are configurable in `appsettings.json` under `Hangfire`.
 
 ## Authentication Flow
 
-Only `@aimpointdigital.com` email addresses can register or sign in. Registration requires email confirmation. Email OTP two-factor authentication is controlled by `Authentication:UseOtp`, password reset is supported, and lockout is configured after repeated failed attempts.
+Only `@aimpointdigital.com` email addresses can register or sign in. New registrations are automatically email-confirmed. Email OTP two-factor authentication is controlled by `Authentication:UseOtp`, password reset is supported, and lockout is configured after repeated failed attempts.
 
 The first registered user receives the `Admin` role. Later users receive `Operator`. The Hangfire dashboard and configuration/job pages require `Admin`.
 
@@ -195,7 +195,7 @@ Outbound BambooHR and Axomo HTTP clients use Polly with three exponential-backof
 
 ## Troubleshooting
 
-- Registration email not received: confirm `SMTP` settings. In development, the confirmation link is displayed on the registration confirmation page.
+- Sign-in code or password reset email not received: confirm `SMTP` settings.
 - SMTP certificate error: use the server hostname that matches the certificate, trust the issuing CA, or temporarily set `SMTP:AllowInvalidServerCertificate=true` for local development only.
 - Jobs are not issuing credits: check `FeatureFlags`, Hangfire dashboard, and `AuditLog`.
 - Duplicate employee credit prevented: inspect `EmployeeCreditHistory` and Axomo credit logs.
