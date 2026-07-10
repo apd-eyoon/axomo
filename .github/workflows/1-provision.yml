@@ -1,0 +1,200 @@
+# Workflow 1: Provision EC2 Infrastructure
+#
+# Run this once (or after major infra changes) to prepare the EC2 instance.
+# It installs the .NET 10 runtime, nginx, creates the systemd service unit,
+# and writes the RDS connection string into a root-owned environment file.
+#
+# Required GitHub Secrets:
+#   EC2_HOST        — EC2 public IP or hostname
+#   EC2_USER        — SSH username (e.g. ubuntu)
+#   EC2_SSH_KEY     — Full PEM private key content
+#   RDS_HOST        — RDS MySQL endpoint
+#   RDS_PORT        — MySQL port (typically 3306)
+#   RDS_DATABASE    — Database name
+#   RDS_USER        — MySQL username
+#   RDS_PASSWORD    — MySQL password
+#
+# NOTE: The app uses Microsoft.EntityFrameworkCore.SqlServer and Hangfire.SqlServer,
+# targeting RDS SQL Server. No provider changes are needed.
+
+name: "1 · Provision EC2"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  provision:
+    name: Provision EC2 infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Install .NET 10 ASP.NET Core runtime
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          if dotnet --list-runtimes 2>/dev/null | grep -q "Microsoft.AspNetCore.App 10"; then
+            echo "✓ .NET 10 runtime already installed"
+            exit 0
+          fi
+          UBUNTU_VERSION=$(lsb_release -rs)
+          wget -q "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VERSION}/packages-microsoft-prod.deb" \
+            -O /tmp/packages-microsoft-prod.deb
+          sudo dpkg -i /tmp/packages-microsoft-prod.deb
+          rm /tmp/packages-microsoft-prod.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y aspnetcore-runtime-10.0
+          echo "Installed: $(dotnet --list-runtimes | grep AspNetCore)"
+          ENDSSH
+
+      - name: Install nginx
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo apt-get install -y nginx
+          sudo systemctl enable nginx
+          sudo systemctl start nginx
+          echo "✓ nginx ready: $(nginx -v 2>&1)"
+          ENDSSH
+
+      - name: Create service user and directories
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          # Dedicated system user — no login shell, no home directory
+          if id storecreditor > /dev/null 2>&1; then
+            echo "✓ Service user 'storecreditor' already exists"
+          else
+            if ! sudo useradd --system --no-create-home --shell /bin/false storecreditor; then
+              echo "ERROR: failed to create service user 'storecreditor'" >&2
+              exit 1
+            fi
+            echo "✓ Service user 'storecreditor' created"
+          fi
+          sudo mkdir -p /var/www/storecreditor
+          sudo mkdir -p /etc/storecreditor
+          sudo chown storecreditor:storecreditor /var/www/storecreditor
+          echo "✓ Service user and directories ready"
+          ENDSSH
+
+      # Secrets are expanded on the runner and written to a temp file,
+      # then SCP'd to the instance. This keeps secrets out of SSH command lines.
+      - name: Write environment file
+        env:
+          RDS_HOST: ${{ secrets.RDS_HOST }}
+          RDS_PORT: ${{ secrets.RDS_PORT }}
+          RDS_DATABASE: ${{ secrets.RDS_DATABASE }}
+          RDS_USER: ${{ secrets.RDS_USER }}
+          RDS_PASSWORD: ${{ secrets.RDS_PASSWORD }}
+        run: |
+          {
+            echo "ASPNETCORE_ENVIRONMENT=Production"
+            echo "ASPNETCORE_URLS=http://localhost:5000"
+            echo "ConnectionStrings__DefaultConnection=\"Server=${RDS_HOST},${RDS_PORT};Database=${RDS_DATABASE};User Id=${RDS_USER};Password=${RDS_PASSWORD};Encrypt=True;TrustServerCertificate=True;\""
+          } > /tmp/storecreditor.env
+
+          scp /tmp/storecreditor.env ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor.env
+          rm -f /tmp/storecreditor.env
+
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo mv /tmp/storecreditor.env /etc/storecreditor/environment
+          # 640: root owns, storecreditor group can read, world cannot
+          sudo chmod 640 /etc/storecreditor/environment
+          sudo chown root:storecreditor /etc/storecreditor/environment
+          echo "✓ Environment file installed at /etc/storecreditor/environment"
+          ENDSSH
+
+      - name: Install systemd service unit
+        run: |
+          cat > /tmp/storecreditor.service << 'EOF'
+          [Unit]
+          Description=StoreCreditor ASP.NET Core Application
+          After=network.target
+
+          [Service]
+          Type=simple
+          User=storecreditor
+          Group=storecreditor
+          WorkingDirectory=/var/www/storecreditor
+          ExecStart=/usr/bin/dotnet /var/www/storecreditor/StoreCreditor.Web.dll
+          Restart=on-failure
+          RestartSec=10
+          KillSignal=SIGINT
+          SyslogIdentifier=storecreditor
+          EnvironmentFile=/etc/storecreditor/environment
+          NoNewPrivileges=true
+          PrivateTmp=true
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          scp /tmp/storecreditor.service ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor.service
+          rm -f /tmp/storecreditor.service
+
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo mv /tmp/storecreditor.service /etc/systemd/system/storecreditor.service
+          sudo chmod 644 /etc/systemd/system/storecreditor.service
+          sudo systemctl daemon-reload
+          sudo systemctl enable storecreditor
+          echo "✓ systemd service registered and enabled"
+          ENDSSH
+
+      # The map directive handles both plain HTTP keep-alive and WebSocket upgrades,
+      # which is required for Blazor Server SignalR connections.
+      - name: Configure nginx reverse proxy
+        run: |
+          cat > /tmp/storecreditor.nginx << 'EOF'
+          map $http_upgrade $connection_upgrade {
+              default upgrade;
+              ''      close;
+          }
+
+          server {
+              listen 80;
+              server_name _;
+
+              client_max_body_size 50M;
+
+              location / {
+                  proxy_pass         http://127.0.0.1:5000;
+                  proxy_http_version 1.1;
+
+                  # WebSocket / Blazor SignalR
+                  proxy_set_header   Upgrade           $http_upgrade;
+                  proxy_set_header   Connection        $connection_upgrade;
+
+                  # Forward original request context to ASP.NET Core
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+
+                  proxy_read_timeout 300s;
+                  proxy_cache_bypass $http_upgrade;
+              }
+          }
+          EOF
+
+          scp /tmp/storecreditor.nginx ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor.nginx
+          rm -f /tmp/storecreditor.nginx
+
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo mv /tmp/storecreditor.nginx /etc/nginx/sites-available/storecreditor
+          sudo ln -sf /etc/nginx/sites-available/storecreditor /etc/nginx/sites-enabled/storecreditor
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo nginx -t
+          sudo systemctl reload nginx
+          echo "✓ nginx configured and reloaded"
+          echo ""
+          echo "Provisioning complete. Run workflow '3 · Build & Deploy' to deploy the app."
+          ENDSSH

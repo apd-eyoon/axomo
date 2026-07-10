@@ -1,0 +1,186 @@
+# Workflow 3: Build and Deploy
+#
+# Builds the app in Release mode, publishes it, runs EF Core database migrations
+# via a self-contained migration bundle, then deploys to the EC2 instance and
+# restarts the systemd service. The app is then accessible at http://<EC2_HOST>.
+#
+# Trigger: push to main, or manually via workflow_dispatch.
+#
+# Required GitHub Secrets:
+#   EC2_HOST        — EC2 public IP or hostname
+#   EC2_USER        — SSH username (e.g. ubuntu)
+#   EC2_SSH_KEY     — Full PEM private key content
+#   RDS_HOST        — RDS SQL Server endpoint
+#   RDS_PORT        — SQL Server port (typically 1433)
+#   RDS_DATABASE    — Database name
+#   RDS_USER        — SQL Server username
+#   RDS_PASSWORD    — SQL Server password
+#
+# PREREQUISITES:
+#   1. Run workflow '1 · Provision EC2' at least once before deploying.
+#
+# HTTPS / COOKIE NOTE:
+#   The app sets CookieSecurePolicy.Always, so authentication cookies require HTTPS.
+#   If you are accessing via plain HTTP over a private network, change the cookie policy
+#   in Program.cs to CookieSecurePolicy.SameAsRequest, or set up SSL termination in nginx
+#   (e.g. via certbot: sudo certbot --nginx -d your-domain.com).
+
+name: "3 · Build & Deploy"
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    name: Build, migrate, and deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore dependencies
+        run: dotnet restore StoreCreditor.sln
+
+      - name: Build
+        run: dotnet build StoreCreditor.sln -c Release --no-restore
+
+      - name: Publish
+        run: |
+          dotnet publish src/StoreCreditor.Web/StoreCreditor.Web.csproj \
+            -c Release \
+            --no-build \
+            -o ./publish
+
+      # Produces a self-contained Linux executable that applies EF Core migrations
+      # without needing the .NET SDK installed on the EC2 instance.
+      - name: Build EF Core migration bundle
+        run: |
+          echo "=== .NET environment ==="
+          dotnet --version
+          dotnet --list-sdks
+          dotnet --list-runtimes
+
+          echo "=== Installing dotnet-ef globally ==="
+          dotnet tool install --global dotnet-ef --version 10.0.9
+          export PATH="$PATH:$HOME/.dotnet/tools"
+
+          echo "=== Verifying dotnet-ef binary ==="
+          which dotnet-ef || echo "dotnet-ef not found in PATH"
+          dotnet-ef --version || echo "dotnet-ef --version failed"
+
+          echo "=== Local tool manifest ==="
+          cat src/StoreCreditor.Web/dotnet-tools.json || echo "No local tool manifest found"
+
+          echo "=== Restoring with linux-x64 runtime for migration bundle ==="
+          dotnet restore StoreCreditor.sln --runtime linux-x64
+
+          echo "=== Running migration bundle ==="
+          dotnet-ef migrations bundle \
+            --project src/StoreCreditor.Data \
+            --startup-project src/StoreCreditor.Web \
+            --self-contained \
+            --runtime linux-x64 \
+            --output ./migrationbundle \
+            --force \
+            --verbose
+
+      - name: Package deployment artifacts
+        run: |
+          tar -czf storecreditor-deploy.tar.gz -C ./publish .
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload artifacts to EC2
+        run: |
+          scp storecreditor-deploy.tar.gz \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/storecreditor-deploy.tar.gz
+          scp migrationbundle \
+            ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}:/tmp/migrationbundle
+
+      - name: Stop service before deployment
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          if systemctl is-active --quiet storecreditor; then
+            sudo systemctl stop storecreditor
+            echo "✓ Service stopped"
+          else
+            echo "Service was not running"
+          fi
+          ENDSSH
+
+      - name: Deploy application files
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo rm -rf /var/www/storecreditor/*
+          sudo tar -xzf /tmp/storecreditor-deploy.tar.gz -C /var/www/storecreditor
+          sudo chown -R storecreditor:storecreditor /var/www/storecreditor
+          sudo chmod -R 755 /var/www/storecreditor
+          rm -f /tmp/storecreditor-deploy.tar.gz
+          echo "✓ Application files deployed to /var/www/storecreditor"
+          ENDSSH
+
+      # The migration bundle reads the connection string from the environment file
+      # written by workflow 1. It is self-contained and does not need the SDK.
+      - name: Run database migrations
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo chmod +x /tmp/migrationbundle
+          # Source the environment file to get the connection string, then run migrations
+          sudo bash -c '
+            set -a
+            source /etc/storecreditor/environment
+            set +a
+            /tmp/migrationbundle
+          '
+          rm -f /tmp/migrationbundle
+          echo "✓ Migrations applied"
+          ENDSSH
+
+      - name: Start service
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo systemctl start storecreditor
+          # Wait a moment and verify the service came up
+          sleep 5
+          if systemctl is-active --quiet storecreditor; then
+            echo "✓ storecreditor service is running"
+          else
+            echo "ERROR: Service failed to start. Checking logs..."
+            sudo journalctl -u storecreditor -n 50 --no-pager
+            exit 1
+          fi
+          ENDSSH
+
+      - name: Smoke test
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 http://localhost:5000/ || echo "000")
+          echo "HTTP response from localhost:5000 → ${HTTP_CODE}"
+          if [ "${HTTP_CODE}" = "000" ]; then
+            echo "ERROR: App did not respond"
+            sudo journalctl -u storecreditor -n 30 --no-pager
+            exit 1
+          fi
+          echo "✓ App is responding"
+          echo ""
+          echo "Deployment complete. Access the app at: http://${{ secrets.EC2_HOST }}"
+          ENDSSH
