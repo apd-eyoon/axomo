@@ -2,7 +2,8 @@
 #
 # Run this once (or after major infra changes) to prepare the EC2 instance.
 # It installs the .NET 10 runtime, nginx, creates the systemd service unit,
-# and writes the RDS connection string into a root-owned environment file.
+# configures nginx to serve the app on HTTP and HTTPS, and writes the RDS
+# connection string into a root-owned environment file.
 #
 # Required GitHub Secrets:
 #   EC2_HOST        — EC2 public IP or hostname
@@ -57,10 +58,35 @@ jobs:
         run: |
           ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
           set -euo pipefail
-          sudo apt-get install -y nginx
+          sudo apt-get install -y nginx openssl
           sudo systemctl enable nginx
           sudo systemctl start nginx
           echo "✓ nginx ready: $(nginx -v 2>&1)"
+          ENDSSH
+
+      # Creates a local fallback certificate so nginx can listen on 443 immediately.
+      # Replace this later with a trusted certificate, for example:
+      #   sudo certbot --nginx -d your-domain.com
+      - name: Create fallback TLS certificate
+        run: |
+          ssh ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} 'bash -s' << 'ENDSSH'
+          set -euo pipefail
+          sudo mkdir -p /etc/storecreditor/tls
+          if [ -f /etc/storecreditor/tls/storecreditor.crt ] && [ -f /etc/storecreditor/tls/storecreditor.key ]; then
+            echo "✓ Fallback TLS certificate already exists"
+            exit 0
+          fi
+          sudo openssl req \
+            -x509 \
+            -nodes \
+            -newkey rsa:2048 \
+            -days 365 \
+            -keyout /etc/storecreditor/tls/storecreditor.key \
+            -out /etc/storecreditor/tls/storecreditor.crt \
+            -subj "/CN=storecreditor.local"
+          sudo chmod 600 /etc/storecreditor/tls/storecreditor.key
+          sudo chmod 644 /etc/storecreditor/tls/storecreditor.crt
+          echo "✓ Fallback TLS certificate created"
           ENDSSH
 
       - name: Create service user and directories
@@ -161,6 +187,35 @@ jobs:
           server {
               listen 80;
               server_name _;
+
+              client_max_body_size 50M;
+
+              location / {
+                  proxy_pass         http://127.0.0.1:5000;
+                  proxy_http_version 1.1;
+
+                  # WebSocket / Blazor SignalR
+                  proxy_set_header   Upgrade           $http_upgrade;
+                  proxy_set_header   Connection        $connection_upgrade;
+
+                  # Forward original request context to ASP.NET Core
+                  proxy_set_header   Host              $host;
+                  proxy_set_header   X-Real-IP         $remote_addr;
+                  proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+                  proxy_set_header   X-Forwarded-Proto $scheme;
+
+                  proxy_read_timeout 300s;
+                  proxy_cache_bypass $http_upgrade;
+              }
+          }
+
+          server {
+              listen 443 ssl;
+              server_name _;
+
+              ssl_certificate     /etc/storecreditor/tls/storecreditor.crt;
+              ssl_certificate_key /etc/storecreditor/tls/storecreditor.key;
+              ssl_protocols       TLSv1.2 TLSv1.3;
 
               client_max_body_size 50M;
 
