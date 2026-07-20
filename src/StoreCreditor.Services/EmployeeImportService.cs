@@ -24,6 +24,7 @@ public sealed class EmployeeImportService(
 
         var employees = await bambooHrService.GetEmployeeDirectoryAsync(cancellationToken);
         var stagingEmails = currentFeatureFlags.GetStagingEmployeeEmailSet();
+        var baselineExistingEmployees = currentFeatureFlags.BaselineExistingEmployeesAsInactive;
         if (currentFeatureFlags.StagingMode)
         {
             if (stagingEmails.Count == 0)
@@ -43,6 +44,7 @@ public sealed class EmployeeImportService(
         }
 
         var imported = 0;
+        var now = DateTimeOffset.UtcNow;
 
         foreach (var employee in employees)
         {
@@ -68,8 +70,9 @@ public sealed class EmployeeImportService(
                 Location = employee.Location,
                 JobTitle = employee.JobTitle,
                 HireDate = employee.HireDate,
-                IsActive = string.Equals(employee.Status, "Active", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(employee.Status),
-                Processed = false
+                IsActive = !baselineExistingEmployees && IsActiveBambooEmployee(employee.Status),
+                Processed = baselineExistingEmployees,
+                ProcessedDate = baselineExistingEmployees ? now : null
             }, cancellationToken);
             imported++;
         }
@@ -79,13 +82,16 @@ public sealed class EmployeeImportService(
             "Information",
             "EmployeeImport",
             "Completed",
-            $"Imported {imported} new employees.",
+            baselineExistingEmployees
+                ? $"Baselined {imported} existing employees as inactive."
+                : $"Imported {imported} new employees.",
             new
             {
                 Imported = imported,
                 Scanned = employees.Count,
                 currentFeatureFlags.StagingMode,
-                StagingEmailCount = stagingEmails.Count
+                StagingEmailCount = stagingEmails.Count,
+                currentFeatureFlags.BaselineExistingEmployeesAsInactive
             },
             cancellationToken: cancellationToken);
         return imported;
@@ -93,4 +99,7 @@ public sealed class EmployeeImportService(
 
     private static bool IsStagingEmployee(string? email, HashSet<string> stagingEmails) =>
         !string.IsNullOrWhiteSpace(email) && stagingEmails.Contains(email.Trim());
+
+    private static bool IsActiveBambooEmployee(string? status) =>
+        string.Equals(status, "Active", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(status);
 }

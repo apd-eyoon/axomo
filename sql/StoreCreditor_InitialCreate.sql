@@ -151,9 +151,36 @@ CREATE UNIQUE INDEX [IX_EmployeeStaging_EmployeeId] ON [EmployeeStaging] ([Emplo
 
 CREATE INDEX [IX_EmployeeStaging_Processed_IsActive] ON [EmployeeStaging] ([Processed], [IsActive]);
 
+IF OBJECT_ID(N'[DataProtectionKeys]') IS NULL
+BEGIN
+    CREATE TABLE [DataProtectionKeys] (
+        [Id] int NOT NULL IDENTITY,
+        [FriendlyName] nvarchar(max) NULL,
+        [Xml] nvarchar(max) NULL,
+        CONSTRAINT [PK_DataProtectionKeys] PRIMARY KEY ([Id])
+    );
+END;
+
 INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
 VALUES (N'20260702142451_InitialCreate', N'10.0.9');
 
+IF NOT EXISTS (
+    SELECT 1 FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20260702184409_YourMigrationName'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20260702184409_YourMigrationName', N'10.0.9');
+END;
+
+IF NOT EXISTS (
+    SELECT 1 FROM [__EFMigrationsHistory]
+    WHERE [MigrationId] = N'20260702210207_AddDataProtectionKeys'
+)
+BEGIN
+    INSERT INTO [__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+    VALUES (N'20260702210207_AddDataProtectionKeys', N'10.0.9');
+END;
+
 COMMIT;
 GO
-

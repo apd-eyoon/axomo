@@ -21,6 +21,7 @@ public sealed class CreditIssuingService(
     public async Task<int> IssuePendingCreditsAsync(CancellationToken cancellationToken)
     {
         var currentFeatureFlags = featureFlags.CurrentValue;
+        var currentCreditOptions = creditOptions.CurrentValue;
         if (!currentFeatureFlags.EnableCreditIssuing || currentFeatureFlags.PauseJobs)
         {
             await auditService.LogAsync("Information", "StoreCredit", "Skipped", "Credit issuing is disabled by feature flag.", cancellationToken: cancellationToken);
@@ -51,7 +52,7 @@ public sealed class CreditIssuingService(
 
         foreach (var employee in employees)
         {
-            var result = await ProcessEmployeeAsync(employee, currentFeatureFlags, cancellationToken);
+            var result = await ProcessEmployeeAsync(employee, currentFeatureFlags, currentCreditOptions, cancellationToken);
             if (result)
             {
                 issued++;
@@ -64,6 +65,7 @@ public sealed class CreditIssuingService(
     private async Task<bool> ProcessEmployeeAsync(
         EmployeeStaging employee,
         FeatureFlagOptions currentFeatureFlags,
+        CreditOptions currentCreditOptions,
         CancellationToken cancellationToken)
     {
         var validation = validator.Validate(employee);
@@ -73,7 +75,6 @@ public sealed class CreditIssuingService(
             return false;
         }
 
-        var currentCreditOptions = creditOptions.CurrentValue;
         var description = currentCreditOptions.NewEmployeeDescription;
         if (await storeCreditRepository.HasSuccessfulNewEmployeeCreditAsync(employee.EmployeeId, description, cancellationToken))
         {

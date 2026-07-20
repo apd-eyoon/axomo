@@ -12,6 +12,8 @@ public sealed class FeatureFlagOptions
 
     public bool DryRunMode { get; set; }
 
+    public bool BaselineExistingEmployeesAsInactive { get; set; }
+
     public bool StagingMode { get; set; }
 
     public string[] StagingEmployeeEmails { get; set; } = [];

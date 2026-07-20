@@ -113,7 +113,8 @@ public sealed class CreditIssuingServiceTests
     private static CreditIssuingService CreateService(
         FakeEmployeeRepository employees,
         FakeStoreCreditRepository storeCredits,
-        FakeAxomoService axomo) =>
+        FakeAxomoService axomo,
+        CreditOptions? creditOptions = null) =>
         new(
             employees,
             storeCredits,
@@ -125,7 +126,7 @@ public sealed class CreditIssuingServiceTests
             {
                 EnableCreditIssuing = true
             }),
-            new TestOptionsMonitor<CreditOptions>(new CreditOptions
+            new TestOptionsMonitor<CreditOptions>(creditOptions ?? new CreditOptions
             {
                 NewEmployeeAmount = 50,
                 NewEmployeeDescription = "New Employee Store Credit"
